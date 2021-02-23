@@ -1,0 +1,3022 @@
+#!/usr/bin/python
+#
+
+#    This program is free software: you can redistribute it and/or modify
+#    it under the terms of the GNU General Public License as published by
+#    the Free Software Foundation, either version 2 of the License, or
+#    (at your option) any later version.
+#
+#    This program is distributed in the hope that it will be useful,
+#    but WITHOUT ANY WARRANTY; without even the implied warranty of
+#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#    GNU General Public License for more details.
+#
+#    You should have received a copy of the GNU General Public License
+#    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+#    Olof Faircreek  <olof.faircreek@NOSPAM.gmail . com>
+
+from __future__ import print_function
+import os
+import re
+import sys
+import getopt
+import pwd
+from collections import namedtuple
+from distutils.util import strtobool
+import shutil
+import tempfile
+import copy
+import getpass
+#import time
+#from time import sleep
+#from pprint import pprint
+import fnmatch
+import errno
+import subprocess
+
+
+# pylint: disable=C0103, C0301, C0111, C0302, R0912, R0912, R0914, R0915, R0913
+
+#######################################################################
+
+
+class formatControl(object):
+
+    BOLD = ''
+    BLINK = ''
+    DIM = ''
+    REVERSE = ''
+    NORMAL = ''
+    UNDERLINE = ''
+    NO_UNDERLINE = ''
+
+    BLACK = RED = GREEN = YELLOW = BLUE = MAGENTA = CYAN = WHITE = ''
+
+    BG_BLACK = BG_RED = BG_GREEN = BG_YELLOW = BG_BLUE = BG_MAGENTA = BG_CYAN = BG_WHITE = ''
+
+    _CAPABILITIES = "BOLD=bold BLINK=blink DIM=dim REVERSE=rev UNDERLINE=smul NO_UNDERLINE=rmul NORMAL=sgr0".split()
+    _ANSICOLORS = "BLACK RED GREEN YELLOW BLUE MAGENTA CYAN WHITE".split()
+
+    def __init__(self, term_stream=sys.stdout):
+
+        import curses
+
+        if not term_stream.isatty():
+            return
+
+        curses.setupterm()
+
+        for capability in self._CAPABILITIES:
+            (attrib, cap_name) = capability.split('=')
+            setattr(self, attrib, self._tigetstr(cap_name) or '')
+
+        set_fg_ansi = self._tigetstr('setaf')
+        if set_fg_ansi:
+            for i, color in enumerate(self._ANSICOLORS):
+                setattr(self, color, curses.tparm(set_fg_ansi, i) or '')
+
+        set_bg_ansi = self._tigetstr('setab')
+        if set_bg_ansi:
+            for i, color in enumerate(self._ANSICOLORS):
+                setattr(self, 'BG_' + color, curses.tparm(set_bg_ansi, i) or '')
+
+    def _tigetstr(self, cap_name):
+        import curses
+        cap = curses.tigetstr(cap_name) or ''
+        return re.sub(r'\$<\d+>[/*]?', '', cap)
+
+
+#######################################################################
+
+class ProgressBar(object):
+    DEFAULT = 'Progress: %(pbar)s %(percent)3d%%'
+    FULL = '%(pbar)s %(current)d/%(total)d (%(percent)3d%%) %(remaining)d to go'
+    FULLLINES = '%(pbar)s %(current)d/%(total)d (%(percent)3d%%) %(remaining)d lines to go'
+    FULLFILES = '%(pbar)s %(current)d/%(total)d (%(percent)3d%%) %(remaining)d files to go'
+
+    def __init__(self, total, width=40, fmt=DEFAULT, symbol='=',
+                 output=sys.stdout, fixed=False, rowOffset=0):
+        assert len(symbol) == 1
+        if fixed:
+            self.width = width
+        else:
+            rows, width = subprocess.check_output(['stty', 'size']).decode().split()
+            if int(width) - 40 > 80:
+                self.width = int(width) / 2
+            else:
+                self.width = int(width) - 40
+
+        self.total = total
+        self.symbol = symbol
+        self.output = output
+        self.fixed = fixed
+        self.counter = 0
+        if not fixed:
+            self.oldrows = int(rows)
+            self.rows = int(rows)
+            self.oldwidth = self.width
+            self.rowOffset = rowOffset
+
+        self.fmt = re.sub(r'(?P<name>%\(.+?\))d', r'\g<name>%dd' % len(str(total)), fmt)
+
+        self.current = 0
+
+    def __call__(self):
+
+        if not self.fixed:
+            rows, width = subprocess.check_output(['stty', 'size']).decode().split()
+            if int(width) - 40 > 80:
+                self.width = int(width) / 2
+            else:
+                self.width = int(width) - 40
+            self.rows = int(rows)
+
+        percent = self.current / float(self.total)
+        size = int(self.width * percent)
+        remaining = self.total - self.current
+        pbar = '[' + self.symbol * size + ' ' * (self.width - size) + ']'
+
+        args = {
+            'total': self.total,
+            'pbar': pbar,
+            'current': self.current,
+            'percent': percent * 100,
+            'remaining': remaining
+        }
+
+        if not self.fixed:
+            if self.rows != self.oldrows:
+                clear()
+            self.oldrows = self.rows
+            #Fixme please fix annoing redraw...
+            #if self.width != self.oldwidth:
+            #    gotoxy(0,0)
+            #    print("we cleared row %d\n" % (self.counter)
+            #    self.counter = self.counter + 1
+            #    gotoxy(0, self.rows/2 + self.rowOffset)
+            #    clreol()
+            #self.oldwith = self.width
+            gotoxy(0, self.rows/2 + self.rowOffset)
+
+        print('\r' + self.fmt % args, file=self.output, end='')
+
+    def done(self):
+        self.current = self.total
+        self()
+        print('', file=self.output)
+
+
+
+
+class FileNameDisplay(object):
+
+    def __init__(self, fileName, rowOffset=1):
+        
+        self.rowOffset = rowOffset
+        self.lenFileName = len(fileName)
+        self.fileName = fileName
+
+    def __call__(self):
+
+        srows, swidth = subprocess.check_output(['stty', 'size']).decode().split()
+        terminalColumns = int(swidth)
+        rows = int(srows)
+
+        if terminalColumns - 40 > 80:
+            maxWidth = terminalColumns / 2 + 33 - 14
+        else:
+            maxWidth = terminalColumns - 40 + 33 - 14
+
+    
+        # [=======================================================================] 578/578 (100%)   0 lines to go
+        # 578/578 (100%)   0 lines to go
+        #Anonymizing:
+    
+        if self.lenFileName > maxWidth:
+            charsToRemove = self.lenFileName - maxWidth
+            frontFileName = (self.lenFileName / 2) - ((charsToRemove / 3) * 2) - 4
+            tailFileName = (self.lenFileName / 2) + (charsToRemove / 3) + 4
+    
+            printString = "Anonymizing: %s.......%s" % (self.fileName[:frontFileName], self.fileName[tailFileName:])
+        else:
+            printString = "Anonymizing: %s" % self.fileName
+
+        clreol()
+        gotoxy(0, rows/2 - self.rowOffset)        
+        print("%s" % printString)
+
+ 
+
+
+#######################################################################
+# Terminal functions
+
+def up():
+    sys.stdout.write('\033[1A')
+    sys.stdout.flush()
+
+def down():
+    sys.stdout.write('\033[1B ')
+    sys.stdout.flush()
+
+def gotoxy(x, y):
+    sys.stdout.write('\033[%s;%sf' % (y, x))
+    sys.stdout.flush()
+
+def clear():
+    sys.stdout.write('\033[H\033[J')
+    sys.stdout.flush()
+
+def clreol():
+    sys.stdout.write('\033[K')
+    sys.stdout.flush()
+
+#######################################################################
+
+
+#def stringTurncate(fileName, terminalColumns):
+#
+#    if terminalColumns - 40 > 80:
+#        maxWidth = terminalColumns / 2 + 33 - 14
+#    else:
+#        maxWidth = terminalColumns - 40 + 33 - 14
+#
+#    # [=======================================================================] 578/578 (100%)   0 lines to go
+#    # 578/578 (100%)   0 lines to go
+#    #Anonymizing:
+#
+#    lenFileName = len(fileName)
+#    if lenFileName > maxWidth:
+#        charsToRemove = lenFileName - maxWidth
+#        frontFileName = (lenFileName / 2) - ((charsToRemove / 3) * 2) - 4
+#        tailFileName = (lenFileName / 2) + (charsToRemove / 3) + 4
+#
+#        printString = "Anonymizing: %s.......%s" % (fileName[:frontFileName], fileName[tailFileName:])
+#    else:
+#        printString = "Anonymizing: %s" % fileName
+#
+#    return printString
+
+
+# Some defaults
+prompt = ''
+try:
+    user = pwd.getpwuid(os.getuid()).pw_name
+except OSError:
+    user = "#"
+prompt = "[%s]> " % user
+
+
+def UpdateProgress(progress):
+    barLength = 50  # Modify this to change the length of the progress bar
+    status = ""
+    if isinstance(progress, int):
+        progress = float(progress)
+    if not isinstance(progress, float):
+        progress = 0
+        status = "error: progress var must be float\r\n"
+    if progress < 0:
+        progress = 0
+        status = "Halt...\r\n"
+    if progress >= 1:
+        progress = 1
+        status = "Done...\r\n"
+    block = int(round(barLength*progress))
+    text = "\r Progress: [{0}] {1}% {2}".format("#"*block + "-"*(barLength-block), int(progress*100), status)
+    sys.stdout.write(text)
+    sys.stdout.flush()
+
+
+def LineCount(filename):
+    import mmap
+    f = open(filename, "r+")
+    buf = mmap.mmap(f.fileno(), 0)
+    lines = 0
+    readline = buf.readline
+    while readline():
+        lines += 1
+    return lines
+
+
+def isWritable(directory):
+    try:
+        filename = tempfile.mkstemp("", ".", directory+'/')[1]
+        os.remove(filename)
+        return True
+    # except OSError as e:
+    except (OSError, IOError):
+        # print("{}".format(e))
+        return False
+
+
+def eprint(*args, **kwargs):
+    print(*args, file=sys.stderr, **kwargs)
+
+
+def getFormat(theString):
+    # Are we on a serial console or not
+    serial = False
+    PPID = os.getppid()
+    o_string = "/proc/%s/fd/0" % PPID
+    if re.match('ttyS', os.path.basename(os.readlink(o_string))):
+        serial = True
+    term = formatControl()
+    if serial:
+        theString = theString.replace("<b>", "")
+        theString = theString.replace("<bl>", "")
+        theString = theString.replace("<dm>", "")
+        theString = theString.replace("<r>", "")
+        theString = theString.replace("<u>", "")
+        theString = theString.replace("</u>", "")
+        theString = theString.replace("</n>", "")
+        theString = theString.replace("<black>", "")
+        theString = theString.replace("<red>", "")
+        theString = theString.replace("<green>", "")
+        theString = theString.replace("<yellow>", "")
+        theString = theString.replace("<blue>", "")
+        theString = theString.replace("<magenta>", "")
+        theString = theString.replace("<cyan>", "")
+        theString = theString.replace("<white>", "")
+        theString = theString.replace("<bg_black>", "")
+        theString = theString.replace("<bg_red>", "")
+        theString = theString.replace("<bg_green>", "")
+        theString = theString.replace("<bg_yellow>", "")
+        theString = theString.replace("<bg_blue>", "")
+        theString = theString.replace("<bg_magenta>", "")
+        theString = theString.replace("<bg_cyan>", "")
+        theString = theString.replace("<bg_white>", "")
+        return theString
+
+    theString = theString.replace("<b>", term.BOLD)
+    theString = theString.replace("<bl>", term.BLINK)
+    theString = theString.replace("<dm>", term.DIM)
+    theString = theString.replace("<r>", term.REVERSE)
+    theString = theString.replace("<u>", term.UNDERLINE)
+    theString = theString.replace("</u>", term.NO_UNDERLINE)
+    theString = theString.replace("</n>", term.NORMAL)
+    theString = theString.replace("<black>", term.BLACK)
+    theString = theString.replace("<red>", term.RED)
+    theString = theString.replace("<green>", term.GREEN)
+    theString = theString.replace("<yellow>", term.YELLOW)
+    theString = theString.replace("<blue>", term.BLUE)
+    theString = theString.replace("<magenta>", term.MAGENTA)
+    theString = theString.replace("<cyan>", term.CYAN)
+    theString = theString.replace("<white>", term.WHITE)
+    theString = theString.replace("<bg_black>", term.BG_BLACK)
+    theString = theString.replace("<bg_red>", term.BG_RED)
+    theString = theString.replace("<bg_green>", term.BG_GREEN)
+    theString = theString.replace("<bg_yellow>", term.BG_YELLOW)
+    theString = theString.replace("<bg_blue>", term.BG_BLUE)
+    theString = theString.replace("<bg_magenta>", term.BG_MAGENTA)
+    theString = theString.replace("<bg_cyan>", term.BG_CYAN)
+    theString = theString.replace("<bg_white>", term.BG_WHITE)
+    return theString
+
+
+def yesNo(query, default="n"):
+    if default == "n":
+        myPrompt = getFormat('%s [y/<b>N</n>]: ' % query)
+    elif default == "y":
+        myPrompt = getFormat('%s [<b>Y</n>/n]: ' % query)
+    else:
+        myPrompt = '%s [y/n]: ' % query
+    val = raw_input(myPrompt)
+    if re.match('^$', '%s' % val, re.IGNORECASE):
+        val = default
+    try:
+        ret = strtobool(val)
+    except ValueError:
+        print(" Please answer with a y/n")
+        return yesNo(query, default)
+    return ret
+
+
+def getOutput(cmd):
+    lines = []
+    output = os.popen(cmd)
+    for line in output:
+        if not re.match(r'^$', line.strip()):
+            lines.append(line.strip())
+    return lines
+
+
+def is_error(output):
+    if output[-1] != "Exit Code: 0x00":
+        return True
+    return False
+
+
+def IsExe(fpath):
+    return os.path.isfile(fpath) and os.access(fpath, os.X_OK)
+
+
+def Which(program):
+    fpath, _fname = os.path.split(program)
+    if fpath:
+        if IsExe(program):
+            return program
+    else:
+        # Add some defaults
+        os.environ["PATH"] += os.pathsep + '/opt/anonymize/bin/'
+        os.environ["PATH"] += os.pathsep + os.path.dirname(os.path.realpath(sys.argv[0]))
+        for path in os.environ["PATH"].split(os.pathsep):
+            path = path.strip('"')
+            exe_file = os.path.join(path, program)
+            if IsExe(exe_file):
+                return exe_file
+    return None
+
+def mkdir_p(path):
+    try:
+        os.makedirs(path)
+    except (OSError, IOError)as exc:
+        if exc.errno == errno.EEXIST and os.path.isdir(path):
+            pass
+        else:
+            eprint("Error creating dir: %s" % path)
+            sys.exit(1)
+
+
+def getPath(exe):
+    cliPath = Which(exe)
+    if cliPath:
+        return cliPath
+    return None
+
+
+def getLines(fh):
+    lines = []
+    output = open(fh, 'r')
+    for line in output:
+        if not re.match(r'^$', line.strip()):
+            lines.append(line.strip())
+    output.close()
+    return lines
+
+
+def FormatPreservingEncryption(anonString, keyGroupTable, key, clipath, lookupDict):
+    try:
+        replaceString = lookupDict[anonString]
+        return replaceString
+    except KeyError:
+        if len(anonString) != 0:
+            cmd = ("%s -e -a %s -t %s -r %s " % (clipath, keyGroupTable[key].keyTuple.key, keyGroupTable[key].keyTuple.tweak, anonString))
+            replaceString = getOutput(cmd)
+            lookupDict.update({anonString: replaceString[0]})
+            return replaceString[0]
+        else:
+            return anonString
+
+
+def anonymizeRegexp(inputFile, outputFile, patternGroupTable, pattern, keyGroupTable, key, multiMatch, clipath, lookupDict, skip, cliBatch, mainprogress = None, fileprogress = None):
+    try:
+        inFile = open(inputFile, 'r')
+    except (OSError, IOError):
+        eprint("Error opening input file %s for reading" % inputFile)
+        if cliBatch:
+            sys.exit(1)
+        return False
+
+    try:
+        outFile = open(outputFile, 'w')
+    except (OSError, IOError):
+        eprint("Error opening output file %s for writing" % outputFile)
+        if cliBatch:
+            sys.exit(1)
+        return False
+
+    #Old ProgressBar
+    #lines = float(LineCount(inputFile))
+    lines = LineCount(inputFile)
+    if cliBatch:
+        progress = ProgressBar(lines, fmt=ProgressBar.FULLLINES, rowOffset=0)
+    else:
+        progress = ProgressBar(lines, fmt=ProgressBar.FULLLINES, fixed=True)
+    patternGroup = patternGroupTable[pattern]
+    lineCounter = 0
+
+
+    for line in inFile:
+        if lineCounter < skip:
+            lineCounter += 1
+            try:
+                outFile.write(line)
+            except (OSError, IOError):
+                eprint(" Error while writing key file %s" % outputFile)
+                return None
+            continue
+
+        i = 0
+        limit = patternGroup.noPatterns
+        while i < limit:
+            if patternGroup.patternTupleTable[i].csv:
+                # Pattern Matching for patterns are regular expressions
+                # ok so the problem is CSV is like this SFERE#$%123456SADSD@$#$@
+                # We want to anaon the shit it the midde or end or startas long as it's a numerical string
+                # print("line: %s\n" % line)
+                fieldSeparator = patternGroup.patternTupleTable[i].startPattern
+                tmpfieldSeparator = r''+re.escape(fieldSeparator)+''
+                fieldNo = int(patternGroup.patternTupleTable[i].endPattern)
+                anonArray = re.split(tmpfieldSeparator, line)
+
+                if fieldNo <= len(anonArray):
+                    if patternGroup.patternTupleTable[i].blank:
+                        replaceString = patternGroup.patternTupleTable[i].blankString * 10
+                        if len(anonArray) == fieldNo:
+                            #Fix me we need to look into this end of line problem in general
+                            replaceString = replaceString + "\n"
+                    else:
+                        anonString = anonArray[fieldNo-1]
+
+                        if len(anonString) < 1:
+                            replaceString = ""
+                        else:
+                            # The pain is that the field can have number and chars all mixed together
+
+                            if patternGroup.patternTupleTable[i].plus:
+                                if anonString[0] == '+':
+                                    if len(anonString) > 1:
+                                        anonString = anonString[1:]
+                                    else:
+                                        anonString = ""
+                            if len(anonString) < 1:
+                                replaceString = ""
+                            else:
+                                numbers = re.split(r'\D+', anonString)
+                                if len(numbers) > 1:
+                                    #We don't normalize mixed strings.
+                                    strings = re.split(r'\d+', anonString)
+                                    # print(anonString)
+                                    # print(numbers)
+                                    # print(strings)
+                                    numbersFirst = False
+                                    if numbers[0]:
+                                        numbersFirst = True
+
+                                    numbers = filter(None, numbers)
+                                    p = 0
+                                    ilimit = len(numbers)
+                                    while p < ilimit:
+                                        numbers[p] = FormatPreservingEncryption(numbers[p], keyGroupTable, key, clipath, lookupDict)
+                                        p += 1
+                                    strings = filter(None, strings)
+                                    # if len(strings) > len(numbers):
+                                    if not numbersFirst:
+                                        numbers = [y for x in map(None, strings, numbers) for y in x if y is not None]
+                                    else:
+                                        numbers = [y for x in map(None, numbers, strings) for y in x if y is not None]
+                                    replaceString = "".join(numbers)
+                                else:
+                                    if patternGroup.patternTupleTable[i].norm:
+                                        if len(anonString) <= patternGroup.patternTupleTable[i].maxNorm and len(anonString) >= patternGroup.patternTupleTable[i].minNorm:
+                                            anonString = patternGroup.patternTupleTable[i].prefix + anonString
+                                    replaceString = FormatPreservingEncryption(anonString, keyGroupTable, key, clipath, lookupDict)
+
+                    anonArray[fieldNo-1] = replaceString
+                    line = ("%s" % fieldSeparator).join(anonArray)
+                    if not patternGroup.patternTupleTable[i].multi:
+                        break
+
+            elif patternGroup.patternTupleTable[i].regExp:
+                # Pattern Matching for patterns are regular expressions
+                startPattern = patternGroup.patternTupleTable[i].startPattern
+                endPattern = patternGroup.patternTupleTable[i].endPattern
+                #FIXME: NEed to match $ for end of line and nothing more....
+                regExpMatch = r'^.*'+startPattern+'[0-9]*'+endPattern+'.*$'
+                if re.match(regExpMatch, '%s' % line):
+                    startString = re.split(startPattern, line, 1)[0]
+                    reminderString = re.split(startPattern, line, 1)[1]
+                    if startPattern == endPattern:
+                        endString = re.split(startPattern, line, 1)[2]
+                    else:
+                        #FIXME of endpattern
+                        try:
+                            endString = re.split(endPattern, reminderString, 1)[1]
+                        except IndexError:
+                            eprint(" Index error, most likely because your start pattern is NOT uniq in the line")
+                            eprint(" The start pattern has to be uniq or we will not know what to anon")
+                            sys.exit(3)
+                    anonString = re.split(startPattern, line, 1)[1]
+                    anonString = re.split(endPattern, anonString, 1)[0]
+                    replaceString = FormatPreservingEncryption(anonString, keyGroupTable, key, clipath, lookupDict)
+                    startReplace = line.split(startString)[1].split(anonString)[0]
+                    endReplace = line.split(anonString)[1].split(endString)[0]
+                    line = ("%s%s%s%s%s" % (startString, startReplace, replaceString, endReplace, endString))
+                    if not patternGroup.patternTupleTable[i].multi:
+                        break
+            else:
+                startPattern = patternGroup.patternTupleTable[i].startPattern
+                endPattern = patternGroup.patternTupleTable[i].endPattern
+                regExpMatch = r'^.*'+re.escape(startPattern)+'[0-9]*'+re.escape(endPattern)+'.*$'
+                if re.match(regExpMatch, '%s' % line):
+                    startString = line.split(startPattern)[0]
+                    reminderString = line.split(startPattern)[1]
+                    if startPattern == endPattern:
+                        endString = line.split(startPattern)[2]
+                    else:
+                        #FIXME See above error with non uniq patterns
+                        endString = reminderString.split(endPattern)[1]
+                    anonString = line.split(startPattern)[1].split(endPattern)[0]
+                    replaceString = FormatPreservingEncryption(anonString, keyGroupTable, key, clipath, lookupDict)
+                    line = ("%s%s%s%s%s" % (startString, startPattern, replaceString, endPattern, endString))
+                    if not patternGroup.patternTupleTable[i].multi:
+                        break
+            i += 1
+        try:
+            outFile.write(line)
+        except (OSError, IOError):
+            eprint(" Error while writing key file %s" % outputFile)
+            if cliBatch:
+                sys.exit(1)
+            return None
+        progress.current += 1
+        progress()
+        if mainprogress:
+            mainprogress()
+            fileprogress()
+        #Old ProgressBar
+        #if lineCounter % 10 == 0:
+        #    progress = float(lineCounter/lines)
+        #    UpdateProgress(progress)
+        lineCounter += 1
+    #UpdateProgress(1.0)
+    progress.done()
+    if not cliBatch:
+        print()
+        print()
+        sys.exit(0)
+
+def GetKeyLines(keyLines):
+    keyGroupTable = []
+    noKeyCount = 0
+
+    for line in keyLines:
+        if re.match(r'^TOTAL_NO_KEY_GROUPS.*$', line.strip()):
+            # We match here first in the pattern so reset the vars
+            totalNoKeyGroups = int(line.split('=')[1].strip())
+            keyGroupTable.append(totalNoKeyGroups)
+
+        if re.match(r'^KEY_GROUP_NAME.*$', line.strip()):
+            keyName = line.split('=')[1].strip()
+
+        if re.match(r'^@#@.*$', line.strip()):
+
+            noKeyCount += 1
+            if noKeyCount > totalNoKeyGroups:
+                print("Error pattern count error")
+            tweak = line.split('@#@')[1]
+            key = line.split('@#@')[2]
+
+            keyTuple = namedtuple('keyTuple', ['tweak',
+                                               'key'])
+            keyTuple.tweak = tweak
+            keyTuple.key = key
+
+            keyGroup = namedtuple('keyGroup', ['keyName',
+                                               'keyTuple'])
+            keyGroup.keyTuple = keyTuple
+            keyGroup.keyName = keyName
+
+            keyGroupTable.append(keyGroup)
+
+    if keyGroupTable[0] >= 1:
+        return keyGroupTable
+    return None
+
+
+def SaveKeyGroupTable(keyGroupTable, keyFile, anonDir, notSavedKey):
+    if os.path.isfile(keyFile):
+        filename = os.path.basename(keyFile)
+        backup = ("%s/%s.bak" % (anonDir, filename))
+        shutil.copy2(keyFile, backup)
+
+    notSavedKey = True
+    try:
+        fh = open(keyFile, 'w')
+    except (OSError, IOError):
+        eprint(" Error while writing key file %s" % keyFile)
+        return notSavedKey
+
+    totalNoPatterns = keyGroupTable[0]
+    tmpString = "TOTAL_NO_KEY_GROUPS=%d\n" % (totalNoPatterns)
+
+    try:
+        fh.write(tmpString)
+    except (OSError, IOError):
+        eprint(" Error while writing key file %s" % keyFile)
+        return notSavedKey
+
+    outLoop = 1
+
+    while outLoop <= totalNoPatterns:
+        tmpString = "KEY_GROUP_NAME=%s\n" % (keyGroupTable[outLoop].keyName)
+        try:
+            fh.write(tmpString)
+        except (OSError, IOError):
+            eprint(" Error while writing pattern file %s" % keyFile)
+            return notSavedKey
+
+        tmpString = "@#@%s@#@%s@#@\n" % (keyGroupTable[outLoop].keyTuple.tweak,
+                                         keyGroupTable[outLoop].keyTuple.key)
+        try:
+            fh.write(tmpString)
+        except (OSError, IOError):
+            eprint(" Error while writing pattern file %s" % keyFile)
+            return notSavedKey
+
+        outLoop += 1
+
+    notSavedKey = False
+    return notSavedKey
+
+
+def newPassType(passWordTopic):
+    myCont = True
+    while myCont:
+        choice = ''
+        while True:
+            print()
+            print(getFormat(" <b>New %s</n>" % passWordTopic))
+            print()
+            print(" %s need to be one word" % passWordTopic)
+            print(" containing any A-P,R-Z,a-p,r-z,0-9 and _")
+            print()
+            print(getFormat(" <b>Q</n>uit) Quit"))
+            print()
+            choice = getpass.getpass(prompt)
+            print()
+            if re.match(r'^.*$', '%s' % choice):
+                firstPass = choice.strip()
+                break
+            elif re.match('q|quit', '%s' % choice, re.IGNORECASE):
+                return None
+            elif re.match('^$', '%s' % choice, re.IGNORECASE):
+                continue
+            else:
+                print("%s is not a valid %s" % ("xxxxxxx", passWordTopic))
+
+        choice = ''
+        while True:
+            print()
+            print(getFormat(" <b>Repeate New %s</n>" % passWordTopic))
+            print()
+            print(getFormat(" <b>Q</n>uit) Quit"))
+            print()
+            choice = getpass.getpass(prompt)
+            print()
+            regExp = r'^'+re.escape(firstPass)+'$'
+            if re.match(regExp, '%s' % choice):
+                myCont = False
+                break
+            elif re.match('q|quit', '%s' % choice, re.IGNORECASE):
+                return None
+            elif re.match('^$', '%s' % choice, re.IGNORECASE):
+                continue
+            else:
+                print(getFormat(" <b>%s</n> doesn't match" % (passWordTopic)))
+                break
+
+    return firstPass
+
+
+def newTweak(tweak=''):
+    choice = ''
+    while True:
+        print()
+        print(" Tweak need to be one word")
+        print(" containing any A-P,R-Z,a-p,r-z,0-9 and _")
+        print()
+        if tweak != '':
+            print(getFormat(" <b>Enter</n>) %s" % tweak))
+        print(getFormat(" <b>Q</n>uit) Quit"))
+        print()
+        choice = raw_input(prompt)
+        print()
+        if re.match(r'^[A-PR-Za-pr-z0-9_][A-Za-z0-9_]*$', '%s' % choice, re.IGNORECASE):
+            tweak = choice.strip()
+            break
+        elif re.match('^q|^quit', '%s' % choice, re.IGNORECASE):
+            return None
+        elif re.match('^$', '%s' % choice, re.IGNORECASE):
+            if tweak != '':
+                break
+            continue
+        else:
+            print("%s is not a valid name" % choice)
+            continue
+    return tweak
+
+
+def NewKeyTuple(clipath, notSavedKey):
+    keyTuple = namedtuple('keyTuple', ['tweak',
+                                       'key'])
+    salt = newPassType("Salt")
+
+    if salt:
+        password = newPassType("Password")
+    else:
+        return None, notSavedKey
+
+    if password:
+        tweak = newTweak()
+    else:
+        return None, notSavedKey
+
+    if not tweak:
+        return None, notSavedKey
+
+    cmd = ("%s -e  -p %s -s %s -g " % (clipath, password, salt))
+    lines = getOutput(cmd)
+
+    keyTuple.tweak = tweak
+    keyTuple.key = lines[0]
+
+    notSavedKey = True
+    return keyTuple, notSavedKey
+
+
+def NewKeyGroup(clipath, notSavedKey):
+    keyGroup = namedtuple('keyGroup', ['keyName',
+                                       'keyTuple'])
+
+    choice = ''
+    while True:
+        print()
+        print(getFormat(" <b>New Key and Tweak Group</n>:"))
+        print()
+        print(" The Key and Tweak Group name need to be one word")
+        print(" containing any A-P,R-Z,a-p,r-z,0-9 and _")
+        print()
+        print(getFormat(" <b>Q</n>uit) Quit"))
+        print()
+        choice = raw_input(prompt)
+        print()
+        if re.match(r'^[A-PR-Za-pr-z0-9_][A-Za-z0-9_]*$', '%s' % choice, re.IGNORECASE):
+            groupName = choice.strip()
+        elif re.match('^q|^quit', '%s' % choice, re.IGNORECASE):
+            return None, notSavedKey
+        elif re.match('^$', '%s' % choice, re.IGNORECASE):
+            continue
+        else:
+            print("%s is not a valid name" % choice)
+            continue
+
+        keyTuple, notSavedKey = NewKeyTuple(clipath, notSavedKey)
+        if keyTuple is None:
+            continue
+        break
+
+    keyGroup.keyName = groupName
+    keyGroup.keyTuple = keyTuple
+    notSavedKey = True
+    return keyGroup, notSavedKey
+
+
+def CreateKeyFile(keyFile, anonDir, clipath, notSavedKey):
+    keyGroupTable = []
+    keyGroup, notSavedKey = NewKeyGroup(clipath, notSavedKey)
+
+    if not keyGroup:
+        return None, notSavedKey
+
+    keyGroupTable.append(1)
+    keyGroupTable.append(keyGroup)
+    notSavedKey = SaveKeyGroupTable(keyGroupTable, keyFile, anonDir, notSavedKey)
+    return keyGroupTable, notSavedKey
+
+
+def EditKeyGroupTable(keyGroupTable, notSavedKey):
+    print(getFormat(" <b>Only Key Group Name and Tweak can be editied</n>"))
+    keyGroupNo = SelectKeyGroup(keyGroupTable)
+
+    if keyGroupNo == -1:
+        return keyGroupTable
+
+    groupName = keyGroupTable[keyGroupNo].keyName
+    choice = ''
+    while True:
+        print()
+        print(getFormat(" <b>New Key and Tweak Group Name</n>:"))
+        print()
+        print(" The Key and Tweak Group name need to be one word")
+        print(" containing any A-P,R-Z,a-p,r-z,0-9 and _")
+        print()
+        print(getFormat(" <b>Enter</n>) %s" % groupName))
+        print(getFormat(" <b>Q</n>uit) Quit"))
+        print()
+        choice = raw_input(prompt)
+        print()
+        if re.match(r'^[A-PR-Za-pr-z0-9_][A-Za-z0-9_]*$', '%s' % choice, re.IGNORECASE):
+            groupName = choice.strip()
+            break
+        elif re.match('^q|^quit', '%s' % choice, re.IGNORECASE):
+            return keyGroupTable, notSavedKey
+        elif re.match('^$', '%s' % choice, re.IGNORECASE):
+            break
+        else:
+            print("%s is not a valid name" % choice)
+            continue
+
+    newKeyGroup = namedtuple('keyGroup', ['keyName',
+                                          'keyTuple'])
+    newKeyGroup.keyName = groupName
+    tweak = newTweak(keyGroupTable[keyGroupNo].keyTuple.tweak)
+
+    if not tweak:
+        return keyGroupTable, notSavedKey
+    print(tweak)
+
+    keyTuple = namedtuple('keyTuple', ['tweak',
+                                       'key'])
+    keyTuple.tweak = tweak
+    keyTuple.key = keyGroupTable[keyGroupNo].keyTuple.key
+    newKeyGroup.keyTuple = keyTuple
+    keyGroupTable[keyGroupNo] = newKeyGroup
+    notSavedKey = True
+    return keyGroupTable, notSavedKey
+
+
+def PrintKeyGroupTable(keyGroupTable):
+
+    drvFmt = " <b>%2s</n> | <b>%-10s</n> | <b>%-10s</n> | <b>%-12s</n>"
+    tmpString = drvFmt % ("#", "Key Group", "Tweak", "Key")
+    print(getFormat("%s" % tmpString))
+
+    drvFmt = " <b>%2s</n> | %-10s | %-10s | %-12s"
+    totalNoKeys = keyGroupTable[0]
+    loop = 1
+    while loop <= totalNoKeys:
+        keyGroup = keyGroupTable[loop]
+        tmpKey = ("%s..%s" % (keyGroup.keyTuple.key[:5], keyGroup.keyTuple.key[-5:]))
+        tmpString = drvFmt % (loop, keyGroup.keyName, keyGroup.keyTuple.tweak, tmpKey)
+        print(getFormat("%s" % tmpString))
+        loop += 1
+
+
+def SelectKeyGroup(keyGroupTable):
+    myRange = keyGroupTable[0]
+    choice = ''
+    while not re.match('q|quit', '%s' % choice, re.IGNORECASE):
+        print()
+        PrintKeyGroupTable(keyGroupTable)
+        print()
+        print(" Select Key Group listed Above:")
+        print()
+        print(getFormat(" <b>Q</n>uit) Quit"))
+        print()
+        choice = raw_input(prompt)
+        print()
+        if not re.match('q|quit', '%s' % choice, re.IGNORECASE) and not re.match('^$', '%s' % choice, re.IGNORECASE):
+            try:
+                selected = int(choice.strip())
+            except ValueError:
+                print("Invalid value")
+                print()
+                continue
+            if (selected > myRange) and (selected < 0):
+                print("%d it not a valid selection" % selected)
+                print()
+                continue
+            if (selected <= myRange) and (selected > 0):
+                return selected
+    return -1
+
+def CliSelectKeyGroup(keyGroupTable, keyNo):
+    myRange = keyGroupTable[0]
+    if (keyNo > myRange) and (keyNo < 0):
+        print("%d it not a valid encryption key number" % keyNo)
+        sys.exit(1)
+    return keyNo
+
+def DeleteKeyGroup(keyGroupTable, notSavedKey):
+    keyGroupNo = SelectKeyGroup(keyGroupTable)
+    if keyGroupNo == -1:
+        return keyGroupTable, notSavedKey
+
+    keyGroupTable.pop(keyGroupNo-1)
+    keyGroupTable[0] = keyGroupTable[0] - 1
+    notSavedKey = True
+    return keyGroupTable, notSavedKey
+
+
+def ManageKeyGroupTable(keyGroupTable, keyFile, clipath, anonDir, notSavedKey):
+    choice = ''
+    while not re.match('q|quit', '%s' % choice, re.IGNORECASE):
+
+        print()
+        print(" Manage Key Groups")
+        print()
+        if notSavedKey:
+            print()
+            print(getFormat(" <bl><b>Pending</n> Key Group Changes"))
+            print()
+
+        print(getFormat(" <b>Pr</n>) Print Key Groups"))
+        print(getFormat(" <b>Cr</n>) Create Key Group"))
+        print(getFormat(" <b>Ed</n>) Edit Key Group"))
+
+        if keyGroupTable[0] > 1:
+            print(getFormat(" <b>De</n>) Delete Key Group"))
+        if notSavedKey:
+            print(getFormat(" <b>Sv</n>) Save Key Groups"))
+        print()
+
+        print()
+        print(getFormat(" <b>Q</n>uit) Quit"))
+        print()
+        choice = raw_input(prompt)
+        print()
+
+        if re.match('Pr', choice, re.IGNORECASE):
+            PrintKeyGroupTable(keyGroupTable)
+            print()
+        if re.match('Ed', choice, re.IGNORECASE):
+            keyGroupTable, notSavedKey = EditKeyGroupTable(keyGroupTable, notSavedKey)
+        if re.match('Cr', choice, re.IGNORECASE):
+            keyGroup, notSavedKey = NewKeyGroup(clipath, notSavedKey)
+            if keyGroup:
+                keyGroupTable.append(keyGroup)
+                keyGroupTable[0] += 1
+        if re.match('De', choice, re.IGNORECASE):
+            keyGroupTable, notSavedKey = DeleteKeyGroup(keyGroupTable, notSavedKey)
+        if re.match('Sv', choice, re.IGNORECASE):
+            notSavedKey = SaveKeyGroupTable(keyGroupTable, keyFile, anonDir, notSavedKey)
+
+    return keyGroupTable, notSavedKey
+
+
+def GetPatternLines(patternLines, patternFile):
+    upgrade = False
+    totalNoPatterns = 0
+    noPatterns = 0
+    noPatternsCount = 0
+    patternGroup = namedtuple('patternGroup', ['patternName',
+                                               'noPatterns',
+                                               'patternTupleTable'])
+    patternGroupTable = []
+    patternTupleTable = []
+
+    for line in patternLines:
+        if re.match(r'^TOTAL_NO_PATTERN_GROUPS.*$', line.strip()):
+            # We match here first in the pattern so reset the vars
+            totalNoPatterns = int(line.split('=')[1].strip())
+            patternGroupTable.append(totalNoPatterns)
+        if re.match(r'^PATTERN_GROUP_NAME.*$', line.strip()):
+            patternName = line.split('=')[1].strip()
+            noPatterns = 0
+            noPatternsCount = 0
+            # tuplePatternTable = []
+
+        if re.match(r'^PATTERN_TUPLE_NO.*$', line.strip()):
+            if noPatterns != 0:
+                print("Error pattern count error")
+            noPatterns = int(line.split('=')[1].strip())
+
+        if re.match(r'^@#@.*$', line.strip()):
+
+            noPatternsCount += 1
+            if noPatternsCount > noPatterns:
+                print("Error pattern count error")
+            line = line.split('@#@')
+            startPattern = line[1]
+            endPattern = line[2]
+            regExpPattern = line[3]
+            csv = line[4]
+
+            patternTuple = namedtuple('patternTuple', ['startPattern',
+                                                       'endPattern',
+                                                       'regExp',
+                                                       'csv',
+                                                       'multi',
+                                                       'plus',
+                                                       'norm',
+                                                       'prefix',
+                                                       'minNorm',
+                                                       'maxNorm',
+                                                       'blank',
+                                                       'blankString'
+                                                      ])
+
+            patternTuple.startPattern = startPattern
+            patternTuple.endPattern = endPattern
+
+            if regExpPattern == "True":
+                patternTuple.regExp = True
+            else:
+                patternTuple.regExp = False
+
+            if csv == "True":
+                patternTuple.csv = True
+            else:
+                patternTuple.csv = False
+
+            if len(line) > 6:
+                multi = line[5]
+                plus = line[6]
+                norm = line[7]
+                prefix = line[8]
+                minNorm = line[9]
+                maxNorm = line[10]
+                blank = line[11]
+                blankString = line[12]
+            else: #Its an upgrade
+                upgrade = True
+                multi = "False"
+                plus = "False"
+                norm = "False"
+                prefix = "0"
+                minNorm = "0"
+                maxNorm = "0"
+                blank = "False"
+                blankString = ""
+
+
+            if multi == "True":
+                patternTuple.multi = True
+            else:
+                patternTuple.multi = False
+
+            if plus == "True":
+                patternTuple.plus = True
+            else:
+                patternTuple.plus = False
+
+            if norm == "True":
+                patternTuple.norm = True
+            else:
+                patternTuple.norm = False
+
+            if blank == "True":
+                patternTuple.blank = True
+            else:
+                patternTuple.blank = False
+
+
+            patternTuple.prefix = prefix
+            patternTuple.minNorm = int(minNorm)
+            patternTuple.maxNorm = int(maxNorm)
+            patternTuple.blankString = blankString
+
+
+            patternTupleTable.append(patternTuple)
+
+            if noPatternsCount == noPatterns:
+                patternGroup = namedtuple('patternGroup', ['patternName',
+                                                           'noPatterns',
+                                                           'patternTupleTable'])
+                patternGroup.patternName = patternName
+                patternGroup.noPatterns = noPatterns
+                patternGroup.patternTupleTable = patternTupleTable
+                patternGroupTable.append(patternGroup)
+                patternTupleTable = []
+
+    if patternGroupTable[0] >= 1:
+        if upgrade:
+            SavePatternGroupTable(patternGroupTable, patternFile)
+        return patternGroupTable
+    return None
+
+
+def widthOfStingsinTuples(patternTupleTable):
+    startWidth = 0
+    endWidth = 0
+
+    for patternTuple in patternTupleTable:
+        if len(patternTuple.startPattern) > startWidth:
+            startWidth = len(patternTuple.startPattern)
+        if len(patternTuple.endPattern) > endWidth:
+            endWidth = len(patternTuple.endPattern)
+    return(startWidth, endWidth)
+
+
+def PrintPatternGroup(index, patternGroup, complete=True, indented=True, patternTupleIndex=True):
+    if index > 0:
+        drvFmt = " <b>%2d</n> | <b>%-8s</n> "
+        tmpString = drvFmt % (index, patternGroup.patternName)
+        print(getFormat("%s" % tmpString))
+    if complete:
+        inLoop = 0
+        inLoopMax = patternGroup.noPatterns
+        patternTupleTable = patternGroup.patternTupleTable
+        startWidth, endWidth = widthOfStingsinTuples(patternTupleTable)
+
+        if startWidth < 13:
+            startWidth = 13
+        if endWidth < 11:
+            endWidth = 11
+
+        while inLoop < inLoopMax:
+            if inLoop == 0:
+                if indented and patternTupleIndex:
+                    drvFmt = " %2s   %-8s <b>%2s</n> | %-"+str(startWidth)+"s | %-"+str(endWidth)+"s | %-6s | %-6s | %-6s | %-6s | %-6s | %-6s | %-6s | %-6s | %-6s | %-6s"
+                    # tmpString = drvFmt % (" ", " ", "#", "Start Pattern", "End Pattern", "RegExp", "CSV")
+                    # tmpString = drvFmt % (" ", " ", "#", "StrPatt/FiSep", "EndPat/FiNo", "RegExp", "CSV")  -- this was the last version.
+                    tmpString = drvFmt % (" ", " ", "#", "StrPatt/FiSep", "EndPat/FiNo", "RegExp", "CSV", "Multi", "Plus", "Norm", "Prefix", "Min", "Max", "Blank", "Hash")
+                    print(getFormat("%s" % tmpString))
+                elif indented and not patternTupleIndex:
+                    drvFmt = " %2s   %-8s %2s | %-"+str(startWidth)+"s | %-"+str(endWidth)+"s | %-6s | %-6s | %-6s | %-6s | %-6s | %-6s | %-6s | %-6s | %-6s | %-6s"
+                    tmpString = drvFmt % (" ", " ", " ", "StrPatt/FiSep", "EndPat/FiNo", "RegExp", "CSV", "Multi", "Plus", "Norm", "Prefix", "Min", "Max", "Blank", "Hash")
+                    print(getFormat("%s" % tmpString))
+                else:
+                    drvFmt = " <b>%2s</n> | <b>%-"+str(startWidth)+"s</n> | <b>%-"+str(endWidth)+"s</n> | <b>%-6s</n> | <b>%-6s</n> | <b>%-6s</n> | <b>%-6s</n> | <b>%-6s</n> | <b>%-6s</n> | <b>%-6s</n> | <b>%-6s</n> | <b>%-6s</n> | <b>%-6s</n> "
+                    tmpString = drvFmt % ("#", "StrPatt/FiSep", "EndPat/FiNo", "RegExp", "CSV", "Multi", "Plus", "Norm", "Prefix", "Min", "Max", "Blank", "Hash")
+                    print(getFormat("%s" % tmpString))
+
+            if indented and patternTupleIndex:
+                drvFmt = " %2s   %-8s %2d | %-"+str(startWidth)+"s | %-"+str(endWidth)+"s | %-6s | %-6s | %-6s | %-6s | %-6s | %-6s | %-6s | %-6s | %-6s | %-6s"
+                tmpString = drvFmt % (" ", " ", inLoop+1,
+                                      patternTupleTable[inLoop].startPattern,
+                                      patternTupleTable[inLoop].endPattern,
+                                      str(patternTupleTable[inLoop].regExp),
+                                      str(patternTupleTable[inLoop].csv),
+                                      str(patternTupleTable[inLoop].multi),
+                                      str(patternTupleTable[inLoop].plus),
+                                      str(patternTupleTable[inLoop].norm),
+                                      patternTupleTable[inLoop].prefix,
+                                      str(patternTupleTable[inLoop].minNorm),
+                                      str(patternTupleTable[inLoop].maxNorm),
+                                      str(patternTupleTable[inLoop].blank),
+                                      patternTupleTable[inLoop].blankString
+                                     )
+
+            elif indented and not patternTupleIndex:
+                drvFmt = " %2s   %-8s %2s | %-"+str(startWidth)+"s | %-"+str(endWidth)+"s | %-6s | %-6s | %-6s | %-6s | %-6s | %-6s | %-6s | %-6s | %-6s | %-6s"
+                tmpString = drvFmt % (" ", " ", " ",
+                                      patternTupleTable[inLoop].startPattern,
+                                      patternTupleTable[inLoop].endPattern,
+                                      str(patternTupleTable[inLoop].regExp),
+                                      str(patternTupleTable[inLoop].csv),
+                                      str(patternTupleTable[inLoop].multi),
+                                      str(patternTupleTable[inLoop].plus),
+                                      str(patternTupleTable[inLoop].norm),
+                                      patternTupleTable[inLoop].prefix,
+                                      str(patternTupleTable[inLoop].minNorm),
+                                      str(patternTupleTable[inLoop].maxNorm),
+                                      str(patternTupleTable[inLoop].blank),
+                                      patternTupleTable[inLoop].blankString
+                                     )
+
+            else:
+                drvFmt = " %2d | %-"+str(startWidth)+"s | %-"+str(endWidth)+"s | %-6s | %-6s | %-6s | %-6s | %-6s | %-6s | %-6s | %-6s | %-6s | %-6s"
+                tmpString = drvFmt % (inLoop+1,
+                                      patternTupleTable[inLoop].startPattern,
+                                      patternTupleTable[inLoop].endPattern,
+                                      str(patternTupleTable[inLoop].regExp),
+                                      str(patternTupleTable[inLoop].csv),
+                                      str(patternTupleTable[inLoop].multi),
+                                      str(patternTupleTable[inLoop].plus),
+                                      str(patternTupleTable[inLoop].norm),
+                                      patternTupleTable[inLoop].prefix,
+                                      str(patternTupleTable[inLoop].minNorm),
+                                      str(patternTupleTable[inLoop].maxNorm),
+                                      str(patternTupleTable[inLoop].blank),
+                                      patternTupleTable[inLoop].blankString
+                                     )
+            print(tmpString)
+            inLoop += 1
+
+
+def PrintPatternGroupTable(patternGroupTable, complete=True, patternTupleIndex=False):
+    indented = True
+    drvFmt = " <b>%2s</n> | <b>%-8s</n> "
+    tmpString = drvFmt % ("#", "Pattern Group")
+    print(getFormat("%s" % tmpString))
+
+    totalNoPatterns = patternGroupTable[0]
+    outLoop = 1
+    while outLoop <= totalNoPatterns:
+        patternGroup = patternGroupTable[outLoop]
+        PrintPatternGroup(outLoop, patternGroup, complete, indented, patternTupleIndex)
+        outLoop += 1
+
+
+def SelectPatternTuple(patternGroup):
+    myRange = patternGroup.noPatterns
+    choice = ''
+    while not re.match('q|quit', '%s' % choice, re.IGNORECASE):
+        print()
+        PrintPatternGroup(0, patternGroup, True, False, True)
+        print()
+        print(" Select Pattern Tuple listed Above:")
+        print()
+        print(getFormat(" <b>Q</n>uit) Quit"))
+        print()
+        choice = raw_input(prompt)
+        print()
+        if not re.match('q|quit', '%s' % choice, re.IGNORECASE) and not re.match('^$', '%s' % choice, re.IGNORECASE):
+            try:
+                selected = int(choice.strip())
+            except ValueError:
+                print("Invalid value")
+                print()
+                continue
+            if (selected > myRange) and (selected < 0):
+                print("%d it not a valid selection" % selected)
+                print()
+                continue
+            if (selected <= myRange) and (selected > 0):
+                return selected
+    return -1
+
+
+def SelectPatternGroup(patternGroupTable, complete=False):
+
+    myRange = patternGroupTable[0]
+    patternTupleIndex = False
+
+    choice = ''
+    while not re.match('q|quit', '%s' % choice, re.IGNORECASE):
+        print()
+        if complete is False:
+            PrintPatternGroupTable(patternGroupTable, complete)
+        else:
+            PrintPatternGroupTable(patternGroupTable, complete, patternTupleIndex)
+        print()
+        print(" Select Pattern Group listed Above:")
+        print()
+        print(getFormat(" <b>Q</n>uit) Quit"))
+        print()
+        choice = raw_input(prompt)
+        print()
+        if not re.match('q|quit', '%s' % choice, re.IGNORECASE) and not re.match('^$', '%s' % choice, re.IGNORECASE):
+            try:
+                selected = int(choice.strip())
+            except ValueError:
+                print("Invalid value")
+                print()
+                continue
+            if (selected > myRange) and (selected < 0):
+                print("%d it not a valid selection" % selected)
+                print()
+                continue
+            if (selected <= myRange) and (selected > 0):
+                return selected
+        if re.match('^$', '%s' % choice, re.IGNORECASE):
+            complete = not complete
+
+    return -1
+
+def CliSelectPatternGroup(patternGroupTable, patternNo):
+
+    myRange = patternGroupTable[0]
+    if (patternNo > myRange) and (patternNo < 0):
+        print("%d it not a valid pattern" % patternNo)
+        sys.exit(1)
+    return patternNo
+
+
+
+
+def RemovePatternTuple(patternGroupTable, index, notSaved):
+    patternTupleNo = SelectPatternTuple(patternGroupTable[index])
+    if patternTupleNo == -1:
+        return patternGroupTable, notSaved
+    patternGroup = namedtuple('patternGroup', ['patternName',
+                                               'noPatterns',
+                                               'patternTupleTable'])
+    patternTupleTable = patternGroupTable[index].patternTupleTable
+    patternTupleTable.pop(patternTupleNo-1)
+    patternGroup.patternTupleTable = patternTupleTable
+    patternGroup.noPatterns = patternGroupTable[index].noPatterns - 1
+    patternGroup.patternName = patternGroupTable[index].patternName
+
+    patternGroupTable[index] = patternGroup
+    notSaved = True
+    return patternGroupTable, notSaved
+
+
+def CopyPatternTuple(patternGroupTable, index, notSaved):
+    patternTupleNo = SelectPatternTuple(patternGroupTable[index])
+    if patternTupleNo == -1:
+        return None, notSaved
+
+    patternTuple = copy.deepcopy(patternGroupTable[index].patternTupleTable[patternTupleNo-1])
+    notSaved = True
+    return patternTuple, notSaved
+
+
+def RegExpOrNot(regExp=False):
+    choice = ''
+    while True:
+        print()
+        print(getFormat("<b> Regular Expression</n>: %s" % str(regExp)))
+        print(" Patterns can be regular expressions, be careful using")
+        print(" regexp all special chars outside the regexp need to be")
+        print(" escaped for the regexp to work and they are slow")
+        print()
+        print(" e.g. @#@Key\: [A-Z]{3,4}@#@ will match")
+        print(" \"Key: XYZA\" , note the escaped :")
+        print()
+        print(getFormat(" <b>Enter</n>) %s" % str(regExp)))
+        print(getFormat(" <b>Q</n>uit) Quit"))
+        print()
+        choice = raw_input(prompt)
+        print()
+        if re.match(r'^T.*$', '%s' % choice, re.IGNORECASE):
+            return True
+        if re.match(r'^F.*$', '%s' % choice, re.IGNORECASE):
+            return False
+        elif re.match('q|quit', '%s' % choice, re.IGNORECASE):
+            return -1
+        elif re.match('^$', '%s' % choice, re.IGNORECASE):
+            return regExp
+        else:
+            print(" %s is not a valid choice" % choice)
+
+
+def CsvOrNot(csv=False):
+    choice = ''
+    while True:
+        print()
+        print(getFormat("<b> CSV</n>: %s" % str(csv)))
+        print(" We have the ability to anonymize CSV files. If")
+        print(" we only need separator and field to anonymize")
+        print()
+        print()
+        print(getFormat(" <b>Enter</n>) %s" % str(csv)))
+        print(getFormat(" <b>Q</n>uit) Quit"))
+        print()
+        choice = raw_input(prompt)
+        print()
+        if re.match(r'^T.*$', '%s' % choice, re.IGNORECASE):
+            return True
+        if re.match(r'^F.*$', '%s' % choice, re.IGNORECASE):
+            return False
+        elif re.match('q|quit', '%s' % choice, re.IGNORECASE):
+            return -1
+        elif re.match('^$', '%s' % choice, re.IGNORECASE):
+            return csv
+        else:
+            print(" %s is not a valid choice" % choice)
+
+
+def MultiOrNot(multi=False):
+    choice = ''
+    while True:
+        print()
+        print(getFormat("<b> Multi</n>: %s" % str(multi)))
+        print(" When several patterns/fields in the same group, the")
+        print(" anonymizer quites after the first pattern/field.")
+        print(" If Multi is True, the anonymizer will contine to advance")
+        print(" to the next pattern or field to match even after the")
+        print(" this is mostly common in CSV files where it can be needed")
+        print(" anonymize or blank out several fields")
+        print()
+        print()
+        print(getFormat(" <b>Enter</n>) %s" % str(multi)))
+        print(getFormat(" <b>Q</n>uit) Quit"))
+        print()
+        choice = raw_input(prompt)
+        print()
+        if re.match(r'^T.*$', '%s' % choice, re.IGNORECASE):
+            return True
+        if re.match(r'^F.*$', '%s' % choice, re.IGNORECASE):
+            return False
+        elif re.match('q|quit', '%s' % choice, re.IGNORECASE):
+            return -1
+        elif re.match('^$', '%s' % choice, re.IGNORECASE):
+            return multi
+        else:
+            print(" %s is not a valid choice" % choice)
+
+def PlusOrNot(plus=False):
+    choice = ''
+    while True:
+        print()
+        print(getFormat("<b> Plus</n>: %s" % str(plus)))
+        print(" Phone numbers can have a plus in them and we support")
+        print(" removing the plus (+) sign before anonymization takes")
+        print(" place. If Plus is set to true we remove the plus sign.")
+        print()
+        print()
+        print(getFormat(" <b>Enter</n>) %s" % str(plus)))
+        print(getFormat(" <b>Q</n>uit) Quit"))
+        print()
+        choice = raw_input(prompt)
+        print()
+        if re.match(r'^T.*$', '%s' % choice, re.IGNORECASE):
+            return True
+        if re.match(r'^F.*$', '%s' % choice, re.IGNORECASE):
+            return False
+        elif re.match('q|quit', '%s' % choice, re.IGNORECASE):
+            return -1
+        elif re.match('^$', '%s' % choice, re.IGNORECASE):
+            return plus
+        else:
+            print(" %s is not a valid choice" % choice)
+
+def NormOrNot(norm=True):
+    choice = ''
+    while True:
+        print()
+        print(getFormat("<b> Norm</n>: %s" % str(norm)))
+        print(" Normalization phone numbers can come with or without")
+        print(" country code. It's needed to normalize numbers without")
+        print(" country code so that the same number with or with out")
+        print(" anonymized equally. If in doubt set this True")
+        print()
+        print()
+        print(getFormat(" <b>Enter</n>) %s" % str(norm)))
+        print(getFormat(" <b>Q</n>uit) Quit"))
+        print()
+        choice = raw_input(prompt)
+        print()
+        if re.match(r'^T.*$', '%s' % choice, re.IGNORECASE):
+            return True
+        if re.match(r'^F.*$', '%s' % choice, re.IGNORECASE):
+            return False
+        elif re.match('q|quit', '%s' % choice, re.IGNORECASE):
+            return -1
+        elif re.match('^$', '%s' % choice, re.IGNORECASE):
+            return norm
+        else:
+            print(" %s is not a valid choice" % choice)
+
+def BlankOrNot(blank=False):
+    choice = ''
+    while True:
+        print()
+        print(getFormat("<b> Blank</n>: %s" % str(blank)))
+        print(" If only hashing or blanking out a field is only needed")
+        print(" then set this to true")
+        print()
+        print()
+        print(getFormat(" <b>Enter</n>) %s" % str(blank)))
+        print(getFormat(" <b>Q</n>uit) Quit"))
+        print()
+        choice = raw_input(prompt)
+        print()
+        if re.match(r'^T.*$', '%s' % choice, re.IGNORECASE):
+            return True
+        if re.match(r'^F.*$', '%s' % choice, re.IGNORECASE):
+            return False
+        elif re.match('q|quit', '%s' % choice, re.IGNORECASE):
+            return -1
+        elif re.match('^$', '%s' % choice, re.IGNORECASE):
+            return blank
+        else:
+            print(" %s is not a valid choice" % choice)
+
+
+
+def EditPatternTuple(patternGroupTable, index, notSaved):
+    patternTupleNo = SelectPatternTuple(patternGroupTable[index])
+
+    if patternTupleNo == -1:
+        return patternGroupTable, False
+
+    patternTuple = patternGroupTable[index].patternTupleTable[patternTupleNo-1]
+
+    while True:
+        csv = CsvOrNot(patternTuple.csv)
+        if csv == -1:
+            return patternGroupTable, False
+
+        if patternTuple.csv != csv:
+            notSaved = True
+
+        # Need a check to see if it changed from csv to regexp and similar we cant have both at thr same time
+        regExp = False
+        if not csv:
+            regExp = RegExpOrNot(patternTuple.regExp)
+            if regExp == -1:
+                return patternGroupTable, False
+
+            if patternTuple.regExp != regExp:
+                notSaved = True
+
+        if (not csv and not regExp) or (not csv and regExp) or (csv and not regExp):
+            #We need to reset if we shift from CSV file to regexp or normal pattern
+            if not csv and patternTuple.csv:
+                plus = False
+                norm = False
+                prefix = "0"
+                minNorm = 0
+                maxNorm = 0
+                blank = False
+                blankString = ""
+            break
+        else:
+            print("You can't have both a RegExp and a CSV at the same time")
+
+    choice = ''
+    while True:
+        print()
+        if csv:
+            print(getFormat(" <b>CSV field separator</n>: %s" % patternTuple.startPattern))
+            print(" separator needs to be prefix and suffixed with @#@ e.g. @#@pattern@#@")
+        else:
+            print(getFormat(" <b>StartPattern</n>: %s" % patternTuple.startPattern))
+            print(" Pattern needs to be prefix and suffixed with @#@ e.g. @#@pattern@#@")
+        print()
+        print(getFormat(" <b>Enter</n>) @#@%s@#@" % patternTuple.startPattern))
+        print(getFormat(" <b>Q</n>uit) Quit"))
+        print()
+        choice = raw_input(prompt)
+        print()
+        if re.match(r'^@#@.*@#@$', '%s' % choice, re.IGNORECASE):
+            startPattern = choice.split('@#@')[1]
+            break
+        elif re.match('q|quit', '%s' % choice, re.IGNORECASE):
+            return patternGroupTable, False
+        elif re.match('^$', '%s' % choice, re.IGNORECASE):
+            startPattern = patternTuple.startPattern
+            break
+        else:
+            print(" %s is not a valid pattern" % choice)
+
+    choice = ''
+    while True:
+        if csv:
+            print()
+            print(getFormat("<b> Field No</n>: %s" % patternTuple.endPattern))
+            print(" The field number that we wish to anonymize")
+            print()
+            print(getFormat(" <b>Enter</n>) %s" % patternTuple.endPattern))
+            print(getFormat(" <b>Q</n>uit) Quit"))
+            print()
+            choice = raw_input(prompt)
+            print()
+            if re.match(r'^[0-9].*$', '%s' % choice, re.IGNORECASE):
+                try:
+                    endPattern = int(choice.strip())
+                except ValueError:
+                    print("Invalid value")
+                    print()
+                    continue
+                if endPattern < 1:
+                    print("%d it not a valid Field" % choice)
+                    print()
+                    continue
+                else:
+                    endPattern = str(endPattern)
+                    break
+            elif re.match('^$', '%s' % choice, re.IGNORECASE):
+                endPattern = patternTuple.endPattern
+                break
+            elif re.match('q|quit', '%s' % choice, re.IGNORECASE):
+                return patternGroupTable, False
+            else:
+                print(" %s is not a valid pattern" % choice)
+        else:
+            print()
+            print(getFormat("<b> EndPattern</n>: %s" % patternTuple.endPattern))
+            print(" Pattern needs to be prefix and suffixed with @#@ e.g. @#@pattern@#@")
+            print()
+            print(getFormat(" <b>Enter</n>) @#@%s@#@" % patternTuple.endPattern))
+            print(getFormat(" <b>Q</n>uit) Quit"))
+            print()
+            choice = raw_input(prompt)
+            print()
+            if re.match(r'^@#@.*@#@$', '%s' % choice, re.IGNORECASE):
+                endPattern = choice.split('@#@')[1]
+                break
+            elif re.match('q|quit', '%s' % choice, re.IGNORECASE):
+                return patternGroupTable, False
+            elif re.match('^$', '%s' % choice, re.IGNORECASE):
+                endPattern = patternTuple.endPattern
+                break
+            else:
+                print(" %s is not a valid pattern" % choice)
+
+    multi = MultiOrNot(patternTuple.multi)
+    if multi == -1:
+        return patternGroupTable, False
+
+    if patternTuple.multi != multi:
+        notSaved = True
+
+
+    if csv:  #At the moment we only support this in CSV files as an inital test.
+        plus = PlusOrNot(patternTuple.plus)
+        if plus == -1:
+            return patternGroupTable, False
+
+        if patternTuple.plus != plus:
+            notSaved = True
+
+        norm = NormOrNot(patternTuple.norm)
+        if norm == -1:
+            return patternGroupTable, False
+
+        if patternTuple.norm != norm:
+            notSaved = True
+
+        if norm:
+            while True:
+                print()
+                print(getFormat("<b> Country code</n>: %s" % patternTuple.prefix))
+                print(" The country code to normalize with")
+                print()
+                print(getFormat(" <b>Enter</n>) %s" % patternTuple.prefix))
+                print(getFormat(" <b>Q</n>uit) Quit"))
+                print()
+                choice = raw_input(prompt)
+                print()
+                if re.match(r'^[0-9].*$', '%s' % choice, re.IGNORECASE):
+                    try:
+                        prefix = int(choice.strip())
+                    except ValueError:
+                        print("Invalid value")
+                        print()
+                        continue
+                    if prefix < 1:
+                        print("%s it not a valid country code" % choice)
+                        print()
+                        continue
+                    else:
+                        prefix = str(prefix)
+                        if prefix != patternTuple.prefix:
+                            notSaved = True
+                        break
+                elif re.match('^$', '%s' % choice, re.IGNORECASE):
+                    prefix = patternTuple.prefix
+                    break
+                elif re.match('q|quit', '%s' % choice, re.IGNORECASE):
+                    return patternGroupTable, False
+                else:
+                    print(" %s is not a valid choice" % choice)
+
+
+            while True:
+                print()
+                print(getFormat("<b> Min value normalization</n>: %s" % str(patternTuple.minNorm)))
+                print(" Phone numbers with this many digits or less are")
+                print(" considered, normalized, this is normaly service")
+                print(" numbers such as e.g. emergency service 911")
+                print()
+                print(getFormat(" <b>Enter</n>) %s" % str(patternTuple.minNorm)))
+                print(getFormat(" <b>Q</n>uit) Quit"))
+                print()
+                choice = raw_input(prompt)
+                print()
+                if re.match(r'^[0-9].*$', '%s' % choice, re.IGNORECASE):
+                    try:
+                        minNorm = int(choice.strip())
+                    except ValueError:
+                        print("Invalid value")
+                        print()
+                        continue
+                    if minNorm < 1:
+                        print("%s it not a valid choice" % choice)
+                        print()
+                        continue
+                    else:
+                        if minNorm != patternTuple.minNorm:
+                            notSaved = True
+                        break
+                elif re.match('^$', '%s' % choice, re.IGNORECASE):
+                    minNorm = patternTuple.minNorm
+                    break
+                elif re.match('q|quit', '%s' % choice, re.IGNORECASE):
+                    return patternGroupTable, False
+                else:
+                    print(" %s is not a valid choice" % choice)
+
+            while True:
+                print()
+                print(getFormat("<b> Max value normalization</n>: %s" % str(patternTuple.maxNorm)))
+                print(" Phone numbers with this many digits or above are")
+                print(" considered, normalized i.e containing country code")
+                print()
+                print(getFormat(" <b>Enter</n>) %s" % str(patternTuple.maxNorm)))
+                print(getFormat(" <b>Q</n>uit) Quit"))
+                print()
+                choice = raw_input(prompt)
+                print()
+                if re.match(r'^[0-9].*$', '%s' % choice, re.IGNORECASE):
+                    try:
+                        maxNorm = int(choice.strip())
+                    except ValueError:
+                        print("Invalid value")
+                        print()
+                        continue
+                    if maxNorm <= minNorm:
+                        print("%s it not a valid choice" % choice)
+                        print()
+                        continue
+                    else:
+                        if maxNorm != patternTuple.maxNorm:
+                            notSaved = True
+                        break
+                elif re.match('^$', '%s' % choice, re.IGNORECASE):
+                    maxNorm = patternTuple.maxNorm
+                    break
+                elif re.match('q|quit', '%s' % choice, re.IGNORECASE):
+                    return patternGroupTable, False
+                else:
+                    print(" %s is not a valid choice" % choice)
+
+        else:
+            prefix = "0"
+            minNorm = 0
+            maxNorm = 0
+
+        blank = BlankOrNot(patternTuple.blank)
+        if blank == -1:
+            return patternGroupTable, False
+
+        if patternTuple.blank != blank:
+            notSaved = True
+
+        if blank:
+            while True:
+                print()
+                print(getFormat("<b> Hash</n>: %s" % patternTuple.blankString))
+                print(" Character you want to blackin if hashing to be composed of")
+                print(" e.g. X, then all chars in the field will be replaced with X")
+                print(" Only one character is allowed, use @#@ to speciy char")
+                print(" e.g. @#@X@#@")
+                print()
+                print(getFormat(" <b>Enter</n>) @#@%s@#@" % patternTuple.blankString))
+                print(getFormat(" <b>Q</n>uit) Quit"))
+                print()
+                choice = raw_input(prompt)
+                print()
+                if re.match(r'^@#@.@#@$', '%s' % choice, re.IGNORECASE):
+                    blankString = choice.split('@#@')[1]
+                    if blankString != patternTuple.blankString:
+                        notSaved = True
+                    break
+                elif re.match('q|quit', '%s' % choice, re.IGNORECASE):
+                    return patternGroupTable, False
+                elif re.match('^$', '%s' % choice, re.IGNORECASE):
+                    blankString = patternTuple.blankString
+                    break
+                else:
+                    print(" %s is not a valid hash pattern" % choice)
+        else:
+            blankString = ""
+
+    else:
+        #put default values back
+        plus = False
+        norm = False
+        prefix = "0"
+        minNorm = 0
+        maxNorm = 0
+        blank = False
+        blankString = ""
+
+    if patternTuple.startPattern != startPattern:
+        notSaved = True
+    if patternTuple.endPattern != endPattern:
+        notSaved = True
+    if not notSaved:
+        return patternGroupTable, notSaved
+
+    newPatternTuple = namedtuple('patternTuple', ['startPattern',
+                                                  'endPattern',
+                                                  'regExp',
+                                                  'csv',
+                                                  'multi',
+                                                  'plus',
+                                                  'norm',
+                                                  'prefix',
+                                                  'minNorm',
+                                                  'maxNorm',
+                                                  'blank',
+                                                  'blankString'
+                                                 ])
+
+    newPatternTuple.startPattern = startPattern
+    newPatternTuple.endPattern = endPattern
+    newPatternTuple.regExp = regExp
+    newPatternTuple.csv = csv
+    newPatternTuple.multi = multi
+    newPatternTuple.plus = plus
+    newPatternTuple.norm = norm
+    newPatternTuple.prefix = prefix
+    newPatternTuple.minNorm = minNorm
+    newPatternTuple.maxNorm = maxNorm
+    newPatternTuple.blank = blank
+    newPatternTuple.blankString = blankString
+
+    patternGroupTable[index].patternTupleTable[patternTupleNo-1] = newPatternTuple
+    return patternGroupTable, notSaved
+
+
+def NewPatternTuple(notSaved):
+
+    while True:
+        csv = CsvOrNot()
+        if csv == -1:
+            return None, False
+
+        regExp = False
+        if not csv:
+            regExp = RegExpOrNot()
+            if regExp == -1:
+                return None, False
+
+        if (not csv and not regExp) or (not csv and regExp) or (csv and not regExp):
+            break
+        else:
+            print("You can't have both a RegExp and a CSV at the same time")
+
+    choice = ''
+    while True:
+        print()
+        if csv:
+            print(getFormat(" <b>CSV field separator</n>:"))
+            print(" separator needs to be prefix and suffixed with @#@ e.g. @#@pattern@#@")
+        else:
+            print(getFormat(" <b>StartPattern</n>:"))
+            print(" Pattern needs to be prefix and suffixed with @#@ e.g. @#@pattern@#@")
+        print()
+        print(getFormat(" <b>Q</n>uit) Quit"))
+        print()
+        choice = raw_input(prompt)
+        print()
+        if re.match(r'^@#@.*@#@$', '%s' % choice, re.IGNORECASE):
+            startPattern = choice.split('@#@')[1]
+            break
+        elif re.match('q|quit', '%s' % choice, re.IGNORECASE):
+            return None, False
+        elif re.match('^$', '%s' % choice, re.IGNORECASE):
+            continue
+        else:
+            print(" %s is not a valid pattern" % choice)
+
+    choice = ''
+    while True:
+        if csv:
+            print()
+            print(getFormat("<b> Field No</n>:"))
+            print(" The field number that we wish to anonymize")
+            print()
+            print(getFormat(" <b>Q</n>uit) Quit"))
+            print()
+            choice = raw_input(prompt)
+            print()
+            if re.match(r'^[0-9].*$', '%s' % choice, re.IGNORECASE):
+                try:
+                    endPattern = int(choice.strip())
+                except ValueError:
+                    print("Invalid value")
+                    print()
+                    continue
+                if endPattern < 1:
+                    print("%d it not a valid Field" % choice)
+                    print()
+                    continue
+                else:
+                    endPattern = str(endPattern)
+                    break
+            elif re.match('^$', '%s' % choice, re.IGNORECASE):
+                continue
+            elif re.match('q|quit', '%s' % choice, re.IGNORECASE):
+                return None, False
+            else:
+                print(" %s is not a valid pattern" % choice)
+        else:
+            print()
+            print(getFormat("<b> EndPattern</n>:"))
+            print(" Pattern needs to be prefix and suffixed with @#@ e.g. @#@pattern@#@")
+            print()
+            print(getFormat(" <b>Q</n>uit) Quit"))
+            print()
+            choice = raw_input(prompt)
+            print()
+            if re.match(r'^@#@.*@#@$', '%s' % choice, re.IGNORECASE):
+                endPattern = choice.split('@#@')[1]
+                break
+            elif re.match('q|quit', '%s' % choice, re.IGNORECASE):
+                return None, False
+            elif re.match('^$', '%s' % choice, re.IGNORECASE):
+                continue
+            else:
+                print(" %s is not a valid pattern" % choice)
+
+
+
+    multi = MultiOrNot()
+    if multi == -1:
+        return None, False
+
+
+    if csv:  #At the moment we only support this in CSV files as an inital test.
+        plus = PlusOrNot()
+        if plus == -1:
+            return None, False
+
+        norm = NormOrNot()
+        if norm == -1:
+            return None, False
+
+        if norm:
+            while True:
+                print()
+                print(getFormat("<b> Country code</n>:"))
+                print(" The country code to normalize with")
+                print()
+                print(getFormat(" <b>Q</n>uit) Quit"))
+                print()
+                choice = raw_input(prompt)
+                print()
+                if re.match(r'^[0-9].*$', '%s' % choice, re.IGNORECASE):
+                    try:
+                        prefix = int(choice.strip())
+                    except ValueError:
+                        print("Invalid value")
+                        print()
+                        continue
+                    if prefix < 1:
+                        print("%s it not a valid country code" % choice)
+                        print()
+                        continue
+                    else:
+                        prefix = str(prefix)
+                        break
+                elif re.match('q|quit', '%s' % choice, re.IGNORECASE):
+                    return None, False
+                else:
+                    print(" %s is not a valid choice" % choice)
+
+
+            while True:
+                print()
+                print(getFormat("<b> Min value normalization</n>:"))
+                print(" Phone numbers with this many digits or less are")
+                print(" considered, normalized, this is normaly service")
+                print(" numbers such as e.g. emergency service 911")
+                print()
+                print(getFormat(" <b>Q</n>uit) Quit"))
+                print()
+                choice = raw_input(prompt)
+                print()
+                if re.match(r'^[0-9].*$', '%s' % choice, re.IGNORECASE):
+                    try:
+                        minNorm = int(choice.strip())
+                    except ValueError:
+                        print("Invalid value")
+                        print()
+                        continue
+                    if minNorm < 1:
+                        print("%s it not a valid choice" % choice)
+                        print()
+                        continue
+                    else:
+                        break
+                elif re.match('q|quit', '%s' % choice, re.IGNORECASE):
+                    return None, False
+                else:
+                    print(" %s is not a valid choice" % choice)
+
+            while True:
+                print()
+                print(getFormat("<b> Max value normalization</n>:"))
+                print(" Phone numbers with this many digits or above are")
+                print(" considered, normalized i.e containing country code")
+                print()
+                print(getFormat(" <b>Q</n>uit) Quit"))
+                print()
+                choice = raw_input(prompt)
+                print()
+                if re.match(r'^[0-9].*$', '%s' % choice, re.IGNORECASE):
+                    try:
+                        maxNorm = int(choice.strip())
+                    except ValueError:
+                        print("Invalid value")
+                        print()
+                        continue
+                    if maxNorm <= minNorm:
+                        print("%s it not a valid choice" % choice)
+                        print()
+                        continue
+                    else:
+                        break
+                elif re.match('q|quit', '%s' % choice, re.IGNORECASE):
+                    return None, False
+                else:
+                    print(" %s is not a valid choice" % choice)
+
+        else:
+            prefix = "0"
+            minNorm = 0
+            maxNorm = 0
+
+        blank = BlankOrNot()
+        if blank == -1:
+            return None, False
+
+        if blank:
+            while True:
+                print()
+                print(getFormat("<b> Hash</n>:"))
+                print(" Character you want to blackin if hashing to be composed of")
+                print(" e.g. X, then all chars in the field will be replaced with X")
+                print(" Only one character is allowed, use @#@ to speciy char")
+                print(" e.g. @#@X@#@")
+                print()
+                print(getFormat(" <b>Q</n>uit) Quit"))
+                print()
+                choice = raw_input(prompt)
+                print()
+                if re.match(r'^@#@.@#@$', '%s' % choice, re.IGNORECASE):
+                    blankString = choice.split('@#@')[1]
+                    break
+                elif re.match('q|quit', '%s' % choice, re.IGNORECASE):
+                    return None, False
+                else:
+                    print(" %s is not a valid hash pattern" % choice)
+        else:
+            blankString = ""
+
+    else:
+        #put default values back
+        plus = False
+        norm = False
+        prefix = "0"
+        minNorm = 0
+        maxNorm = 0
+        blank = False
+        blankString = ""
+
+    patternTuple = namedtuple('patternTuple', ['startPattern',
+                                               'endPattern',
+                                               'regExp',
+                                               'csv',
+                                               'multi',
+                                               'plus',
+                                               'norm',
+                                               'prefix',
+                                               'minNorm',
+                                               'maxNorm',
+                                               'blank',
+                                               'blankString'
+                                              ])
+
+    patternTuple.startPattern = startPattern
+    patternTuple.endPattern = endPattern
+    patternTuple.regExp = regExp
+    patternTuple.csv = csv
+    patternTuple.multi = multi
+    patternTuple.plus = plus
+    patternTuple.norm = norm
+    patternTuple.prefix = prefix
+    patternTuple.minNorm = minNorm
+    patternTuple.maxNorm = maxNorm
+    patternTuple.blank = blank
+    patternTuple.blankString = blankString
+
+    notSaved = True
+    return patternTuple, notSaved
+
+
+
+def ManagePatternGroupTuples(patternGroupTable, index, notSaved):
+    choice = ''
+    while not re.match('q|quit', '%s' % choice, re.IGNORECASE):
+        print()
+        print(" Manage Pattern Tuples in %s Pattern Group" % patternGroupTable[index].patternName)
+        print()
+        print(getFormat(" <b>Pr</n>) Print Pattern Tuples"))
+        print(getFormat(" <b>Cr</n>) Create Pattern Tuple"))
+        print(getFormat(" <b>Cp</n>) Copy Pattern Tuple"))
+        print(getFormat(" <b>Ed</n>) Edit Pattern Tuple"))
+
+        if patternGroupTable[index].noPatterns > 1:
+            print(getFormat(" <b>De</n>) Delete Pattern Tuple"))
+
+        print()
+        print()
+        print(getFormat(" <b>Q</n>uit) Quit"))
+        print()
+        choice = raw_input(prompt)
+        print()
+        if re.match('Pr', choice, re.IGNORECASE):
+            PrintPatternGroup(0, patternGroupTable[index], True, False, True)
+            print()
+        if re.match('Ed', choice, re.IGNORECASE):
+            patternGroupTable, notSaved = EditPatternTuple(patternGroupTable, index, notSaved)
+        if re.match('Cp', choice, re.IGNORECASE):
+            patternTuple, notSaved = CopyPatternTuple(patternGroupTable, index, notSaved)
+            if patternTuple:
+                patternGroup = namedtuple('patternGroup', ['patternName',
+                                                           'noPatterns',
+                                                           'patternTupleTable'])
+
+                patternTupleTable = patternGroupTable[index].patternTupleTable
+                patternTupleTable.append(patternTuple)
+                patternGroup.patternTupleTable = patternTupleTable
+                patternGroup.noPatterns = patternGroupTable[index].noPatterns + 1
+                patternGroup.patternName = patternGroupTable[index].patternName
+                patternGroupTable[index] = patternGroup
+
+        if re.match('Cr', choice, re.IGNORECASE):
+            patternTuple, notSaved = NewPatternTuple(notSaved)
+            if patternTuple:
+                patternGroup = namedtuple('patternGroup', ['patternName',
+                                                           'noPatterns',
+                                                           'patternTupleTable'])
+
+                patternTupleTable = patternGroupTable[index].patternTupleTable
+                patternTupleTable.append(patternTuple)
+                patternGroup.patternTupleTable = patternTupleTable
+                patternGroup.noPatterns = patternGroupTable[index].noPatterns + 1
+                patternGroup.patternName = patternGroupTable[index].patternName
+                patternGroupTable[index] = patternGroup
+
+        if re.match('De', choice, re.IGNORECASE):
+            patternGroupTable, notSaved = RemovePatternTuple(patternGroupTable, index, notSaved)
+
+    return patternGroupTable, notSaved
+
+
+def NewPatternGroup(patternGroupTable, notSaved):
+
+    choice = ''
+    while True:
+        print()
+        print(getFormat(" <b>New Pattern Group</n>"))
+        print(" Pattern group name need to be one word containing any A-P,R-Z,a-p,r-z,0-9 and _")
+        print()
+        print(getFormat(" <b>Q</n>uit) Quit"))
+        print()
+        choice = raw_input(prompt)
+        print()
+        if re.match(r'^[A-PR-Za-pr-z0-9_][A-Za-z0-9_]*$', '%s' % choice, re.IGNORECASE):
+            tmpPatternName = choice.strip()
+            if patternGroupTable:
+                limit = patternGroupTable[0]
+                i = 1
+                exists = False
+                while i <= limit:
+                    if patternGroupTable[i].patternName == tmpPatternName:
+                        print(" Pattern group name already exists")
+                        exists = True
+                        break
+                    i += 1
+                if exists:
+                    continue
+                patternName = choice.strip()
+            else:
+                patternName = choice.strip()
+        elif re.match('^q|^quit', '%s' % choice, re.IGNORECASE):
+            return None, notSaved
+        elif re.match('^$', '%s' % choice, re.IGNORECASE):
+            continue
+        else:
+            print(" %s is not a valid name" % choice)
+            continue
+
+        patternTuple, notSaved = NewPatternTuple(notSaved)
+        if patternTuple is None:
+            continue
+        break
+    # For some reson pylint don't like this one, but the one in edit blow is just fine??
+    patternGroup = namedtuple('patternGroup', ['patternName',
+                                               'noPatterns',
+                                               'patternTupleTable'])
+
+    patternGroup.patternTupleTable = []
+    patternGroup.patternTupleTable.append(patternTuple)
+    patternGroup.noPatterns = 1
+    patternGroup.patternName = patternName
+    notSaved = True
+    return patternGroup, notSaved
+
+
+def EditPatternGroupName(patternGroupTable, index, notSaved):
+    choice = ''
+    while True:
+        print()
+        print(getFormat(" <b>Edit Pattern Group Name</n>"))
+        print("Pattern group name need to be one word containing any A-P,R-Z,a-p,r-z,0-9 and _")
+        print()
+        print(getFormat(" <b>Q</n>uit) Quit"))
+        print()
+        choice = raw_input(prompt)
+        print()
+        if re.match(r'^[A-PR-Za-pr-z0-9_][A-Za-z0-9_]*$', '%s' % choice, re.IGNORECASE):
+            tmpPatternName = choice.strip()
+            limit = patternGroupTable[0]
+            i = 1
+            exists = False
+            while i <= limit:
+                if i == index:
+                    i += 1
+                    continue
+                if patternGroupTable[i].patternName == tmpPatternName:
+                    print(" Pattern group name already exists")
+                    exists = True
+                    break
+
+                i += 1
+            if exists:
+                continue
+            patternName = choice.strip()
+            break
+        elif re.match('^q|^quit', '%s' % choice, re.IGNORECASE):
+            return patternGroupTable, notSaved
+        elif re.match('^$', '%s' % choice, re.IGNORECASE):
+            continue
+        else:
+            print(" %s is not a valid name" % choice)
+            continue
+
+    if patternGroupTable[index].patternName == patternName:
+        return patternGroupTable, notSaved
+
+    patternGroup = namedtuple('patternGroup', ['patternName',
+                                               'noPatterns',
+                                               'patternTupleTable'])
+
+    patternGroup.patternName = patternName
+    patternGroup.noPatterns = patternGroupTable[index].noPatterns
+    patternGroup.patternTupleTable = patternGroupTable[index].patternTupleTable
+    patternGroupTable[index] = patternGroup
+    notSaved = True
+    return patternGroupTable, notSaved
+
+
+def CreatePatternGroupTableFile(patternFile, anonDir, notSaved):
+    patternGroupTable = []
+    patternGroup, notSaved = NewPatternGroup(patternGroupTable, notSaved)
+    if not patternGroup:
+        return None, notSaved
+
+    patternGroupTable.append(1)
+    patternGroupTable.append(patternGroup)
+    notSaved = SavePatternGroupTable(patternGroupTable, patternFile, anonDir, notSaved)
+    return patternGroupTable, notSaved
+
+
+def DeletePatternGroup(patternGroupTable, notSaved):
+    patternGroupNo = SelectPatternGroup(patternGroupTable, False)
+    if patternGroupNo == -1:
+        return patternGroupTable, notSaved
+    notSaved = True
+    patternGroupTable.pop(patternGroupNo)
+    patternGroupTable[0] = patternGroupTable[0] - 1
+    return patternGroupTable, notSaved
+
+
+def CopyPatternGroup(patternGroupTable, notSaved):
+    patternGroupNo = SelectPatternGroup(patternGroupTable, False)
+    if patternGroupNo == -1:
+        return None, notSaved
+
+    patternGroup = copy.deepcopy(patternGroupTable[patternGroupNo])
+    notSaved = True
+    return patternGroup, notSaved
+
+
+def EditPatternGroup(patternGroupTable, notSaved):
+    patternGroupNo = SelectPatternGroup(patternGroupTable, False)
+    if patternGroupNo == -1:
+        return patternGroupTable
+
+    if yesNo(" Edit Pattern Group Name?", "y"):
+        patternGroupTable, notSaved = EditPatternGroupName(patternGroupTable, patternGroupNo, notSaved)
+
+    if yesNo(" Edit Pattern Group Patterns?", "y"):
+        patternGroupTable, notSaved = ManagePatternGroupTuples(patternGroupTable, patternGroupNo, notSaved)
+
+    return patternGroupTable, notSaved
+
+
+def SavePatternGroupTable(patternGroupTable, patternFile, anonDir=None, notSaved=True):
+
+    if not anonDir:
+        homeDir = os.path.expanduser('~')
+        anonDir = homeDir+"/.anonlog"
+
+    if os.path.isfile(patternFile):
+        filename = os.path.basename(patternFile)
+        backup = ("%s/%s.bak" % (anonDir, filename))
+        shutil.copy2(patternFile, backup)
+
+    notSaved = True
+
+    try:
+        fh = open(patternFile, 'w')
+    except (OSError, IOError):
+        eprint(" Error while writing pattern file %s" % patternFile)
+        return notSaved
+
+    totalNoPatterns = patternGroupTable[0]
+    tmpString = "TOTAL_NO_PATTERN_GROUPS=%d\n" % (totalNoPatterns)
+
+    try:
+        fh.write(tmpString)
+    except (OSError, IOError):
+        eprint(" Error while writing pattern file %s" % patternFile)
+        return notSaved
+
+    outLoop = 1
+    while outLoop <= totalNoPatterns:
+        inLoop = 0
+        inLoopMax = patternGroupTable[outLoop].noPatterns
+        tmpString = "PATTERN_GROUP_NAME=%s\n" % (patternGroupTable[outLoop].patternName)
+        try:
+            fh.write(tmpString)
+        except (OSError, IOError):
+            eprint(" Error while writing pattern file %s" % patternFile)
+            return notSaved
+
+        tmpString = "PATTERN_TUPLE_NO=%d\n" % (inLoopMax)
+
+        try:
+            fh.write(tmpString)
+        except (OSError, IOError):
+            eprint(" Error while writing pattern file %s" % patternFile)
+            return notSaved
+
+        while inLoop < inLoopMax:
+            tmpString = "@#@%s@#@%s@#@%s@#@%s@#@%s@#@%s@#@%s@#@%s@#@%s@#@%s@#@%s@#@%s@#@\n" % (patternGroupTable[outLoop].patternTupleTable[inLoop].startPattern,
+                                                                                               patternGroupTable[outLoop].patternTupleTable[inLoop].endPattern,
+                                                                                               str(patternGroupTable[outLoop].patternTupleTable[inLoop].regExp),
+                                                                                               str(patternGroupTable[outLoop].patternTupleTable[inLoop].csv),
+                                                                                               str(patternGroupTable[outLoop].patternTupleTable[inLoop].multi),
+                                                                                               str(patternGroupTable[outLoop].patternTupleTable[inLoop].plus),
+                                                                                               str(patternGroupTable[outLoop].patternTupleTable[inLoop].norm),
+                                                                                               patternGroupTable[outLoop].patternTupleTable[inLoop].prefix,
+                                                                                               str(patternGroupTable[outLoop].patternTupleTable[inLoop].minNorm),
+                                                                                               str(patternGroupTable[outLoop].patternTupleTable[inLoop].maxNorm),
+                                                                                               str(patternGroupTable[outLoop].patternTupleTable[inLoop].blank),
+                                                                                               patternGroupTable[outLoop].patternTupleTable[inLoop].blankString
+                                                                                              )
+            try:
+                fh.write(tmpString)
+            except (OSError, IOError):
+                eprint(" Error while writing pattern file %s" % patternFile)
+                return notSaved
+
+            inLoop += 1
+        outLoop += 1
+
+    notSaved = False
+    return notSaved
+
+
+def ManagePatternGroupTable(patternGroupTable, patternFile, anonDir, notSaved):
+    choice = ''
+    while not re.match('q|quit', '%s' % choice, re.IGNORECASE):
+        print()
+        print(" Manage Pattern Groups in %s Pattern File" % os.path.basename(patternFile))
+        print()
+        if notSaved:
+            print()
+            print(getFormat(" <bl><b> Pending</n> Pattern Group Changes"))
+            print()
+
+        print(getFormat(" <b>Pr</n>) Print Pattern Groups"))
+        print(getFormat(" <b>Cr</n>) Create Pattern Group"))
+        print(getFormat(" <b>Cp</n>) Copy Pattern Group"))
+        print(getFormat(" <b>Ed</n>) Edit Pattern Group"))
+        if patternGroupTable[0] > 1:
+            print(getFormat(" <b>De</n>) Delete Pattern Group"))
+        if notSaved:
+            print(getFormat(" <b>Sv</n>) Save Pattern Groups"))
+        print()
+
+        print()
+        print(getFormat(" <b>Q</n>uit) Quit"))
+        print()
+        choice = raw_input(prompt)
+        print()
+
+        if re.match('Pr', choice, re.IGNORECASE):
+            PrintPatternGroupTable(patternGroupTable)
+            print()
+        if re.match('Ed', choice, re.IGNORECASE):
+            patternGroupTable, notSaved = EditPatternGroup(patternGroupTable, notSaved)
+        if re.match('Cp', choice, re.IGNORECASE):
+            patternGroup, notSaved = CopyPatternGroup(patternGroupTable, notSaved)
+            if patternGroup:
+                patternGroupTable.append(patternGroup)
+                patternGroupTable[0] += 1
+        if re.match('Cr', choice, re.IGNORECASE):
+            patternGroup, notSaved = NewPatternGroup(patternGroupTable, notSaved)
+            if patternGroup:
+                patternGroupTable.append(patternGroup)
+                patternGroupTable[0] += 1
+        if re.match('De', choice, re.IGNORECASE):
+            patternGroupTable, notSaved = DeletePatternGroup(patternGroupTable, notSaved)
+        if re.match('Sv', choice, re.IGNORECASE):
+            notSaved = SavePatternGroupTable(patternGroupTable, patternFile, anonDir, notSaved)
+    return patternGroupTable, notSaved
+
+
+def NewPatternFileName(anonDir):
+    choice = ''
+    while True:
+        print()
+        print(getFormat(" <b>New Pattern Group File Name</n>"))
+        print(" New pattern group file name need to be one word")
+        print(" containing any A-P,R-Z,a-p,r-z,0-9 and _")
+        print()
+        print(getFormat(" <b>Q</n>uit) Quit"))
+        print()
+        choice = raw_input(prompt)
+        print()
+        if re.match(r'^[A-PR-Za-pr-z0-9_][A-Za-z0-9_]*$', '%s' % choice, re.IGNORECASE) and not re.match(r'^default$', '%s' % choice, re.IGNORECASE):
+            if re.match(r'^Key.*$', '%s' % choice, re.IGNORECASE):
+                print(" %s is not a valid name" % choice)
+                continue
+            try:
+                thefile = ("%s/%s" % (anonDir, choice.strip()))
+                myFile = open(thefile, 'r')
+                myFile.close()
+                print(" %s already exists" % choice)
+                continue
+            except (OSError, IOError):
+                patternFileName = choice.strip()
+                break
+        elif re.match('^q|^quit', '%s' % choice, re.IGNORECASE):
+            return None
+        elif re.match('^$', '%s' % choice, re.IGNORECASE):
+            continue
+        else:
+            print(" %s is not a valid name" % choice)
+            continue
+
+    return patternFileName
+
+
+def ListPatternGroupFiles(patternFileList):
+    print()
+    print(" Pattern Groups Files")
+    print()
+
+    drvFmt = " <b>%2s</n> | <b>%-8s</n> "
+    tmpString = drvFmt % ("#", "Pattern Group File")
+    print(getFormat("%s" % tmpString))
+
+    i = 1
+    for myFile in patternFileList:
+        drvFmt = " <b>%2d</n> | %-8s "
+        tmpString = drvFmt % (i, myFile)
+        print(getFormat("%s" % tmpString))
+        i += 1
+
+
+def SelectPatternGroupFile(patternFileList, topic):
+    myRange = len(patternFileList)
+    choice = ''
+    while not re.match('q|quit', '%s' % choice, re.IGNORECASE):
+        print()
+        print(" Pattern Group File selectable %s" % topic)
+        print()
+        ListPatternGroupFiles(patternFileList)
+        print()
+        print(" Select Pattern Group File listed Above:")
+        print()
+        print(getFormat(" <b>Q</n>uit) Quit"))
+        print()
+        choice = raw_input(prompt)
+        print()
+        if not re.match('q|quit', '%s' % choice, re.IGNORECASE) and not re.match('^$', '%s' % choice, re.IGNORECASE):
+            try:
+                selected = int(choice.strip())
+            except ValueError:
+                print(" Invalid value")
+                print()
+                continue
+            if (selected > myRange) and (selected < 0):
+                print(" %d it not a valid selection" % selected)
+                print()
+                continue
+            if (selected <= myRange) and (selected > 0):
+                return selected
+    return -1
+
+
+def ManagePatternGroupFiles(patternGroupTable, patternFile, anonDir, notSaved):
+    patternFileList = []
+
+    choice = ''
+    while not re.match('q|quit', '%s' % choice, re.IGNORECASE):
+        tmpPatternFileList = os.listdir(anonDir)
+        patternFileList = []
+        for myFile in tmpPatternFileList:
+            loadedFile = os.path.basename(patternFile)
+            regExpMatch = r'^'+re.escape(loadedFile)+'$'
+            if not re.match(r'.*\.bak$', '%s' % myFile) and not re.match(r'^key.*$', '%s' % myFile) and not re.match(regExpMatch, '%s' % myFile):
+                patternFileList.append(myFile)
+
+        rmPatternFileList = []
+        loadedFile = os.path.basename(patternFile)
+        regExpMatch = r'^'+re.escape(loadedFile)+'$'
+
+        for myFile in patternFileList:
+            if not re.match(regExpMatch, '%s' % myFile) and not re.match(r'^default$', '%s' % myFile):
+                rmPatternFileList.append(myFile)
+
+        print()
+        print(" Manage Pattern Groups Files, %s Loaded" % (os.path.basename(patternFile)))
+        print()
+        if notSaved:
+            print()
+            print(getFormat(" <bl><b>Pending</n> Pattern Group File Changes"))
+            print()
+
+        if len(patternFileList) >= 1:
+            print(getFormat(" <b>Li</n>) List Pattern Group Files"))
+        print(getFormat(" <b>Cr</n>) Create and Load Pattern Group File"))
+        if len(patternFileList) >= 1:
+            print(getFormat(" <b>Lo</n>) Load Pattern Group File"))
+        if len(rmPatternFileList) > 0:
+            print(getFormat(" <b>De</n>) Delete Pattern Group File"))
+        if notSaved:
+            print(getFormat(" <b>Sv</n>) Save Pattern Group File"))
+        print()
+
+        print()
+        print(getFormat(" <b>Q</n>uit) Quit"))
+        print()
+        choice = raw_input(prompt)
+        print()
+
+        if re.match('Li', choice, re.IGNORECASE):
+            ListPatternGroupFiles(patternFileList)
+            print()
+        if re.match('Lo', choice, re.IGNORECASE):
+
+            fileNo = SelectPatternGroupFile(patternFileList, "to Load")
+            if fileNo != -1:
+                tmpPatternFile = anonDir+"/"+patternFileList[fileNo - 1]
+                patternLines = getLines(tmpPatternFile)
+                if GetPatternLines(patternLines, tmpPatternFile):
+                    patternGroupTable = GetPatternLines(patternLines, tmpPatternFile)
+                    patternFile = tmpPatternFile
+        if re.match('Cr', choice, re.IGNORECASE):
+            newPatternFileName = NewPatternFileName(anonDir)
+            if newPatternFileName:
+                tmpPatternFile = anonDir+"/"+newPatternFileName
+                worked, notSaved = CreatePatternGroupTableFile(tmpPatternFile, anonDir, notSaved)
+                if worked:
+                    patternLines = getLines(tmpPatternFile)
+                    patternGroupTable = GetPatternLines(patternLines, tmpPatternFile)
+                    patternFile = tmpPatternFile
+
+        if re.match('De', choice, re.IGNORECASE):
+            print()
+            print(getFormat(" <b>Note</n>: You can not delete a loaded file"))
+            print()
+            fileNo = SelectPatternGroupFile(rmPatternFileList, "for Deletion")
+            if fileNo != -1:
+                if yesNo(" Do you want to remove the file named %s" % rmPatternFileList[fileNo - 1]):
+                    try:
+                        backup = ("%s/%s.bak" % (anonDir, rmPatternFileList[fileNo - 1]))
+                        shutil.copy2(anonDir+'/'+rmPatternFileList[fileNo-1], backup)
+                        os.remove(anonDir+'/'+rmPatternFileList[fileNo-1])
+                    except (OSError, IOError) as err:
+                        print(" Error while removin %s" % rmPatternFileList[fileNo-1])
+                        print(" {}".format(err))
+        if re.match('Sv', choice, re.IGNORECASE):
+            notSaved = SavePatternGroupTable(patternGroupTable, patternFile, anonDir, notSaved)
+    return patternGroupTable, patternFile, notSaved
+
+
+def usage():
+    print('anonymize -i --infile <inputFile> -o --outputFile <outputFile> -p --pattern  --patternFile <patternFile> --patternNo <#> keyFile <keyFile> --keyNo <#>  --inputDir <inputDir> --outputDir <outputDir> --batch --skip <#>  --filePattern <pattern>')
+
+
+def main(argv):
+    # Sane defaults
+
+    clipath = ''
+    notSavedKey = False
+    notSaved = False
+    managePatterns = False
+    inputFile = ''
+    outputFile = ''
+    inputDir = ''
+    outputDir = ''
+
+    homeDir = ''
+    anonDir = ''
+
+    filePattern = ''
+    skip = 0
+
+
+    patternFile = ''
+    patternFiles = False
+    patternGroupTable = []
+    patternLines = []
+    pattern = None
+    patternNo = None
+    patternFileSpecfied = False
+
+    keyFile = ''
+    keyFiles = False
+    keyGroupTable = []
+    keyLines = []
+    key = None
+    keyNo = None
+    keyFileSpecified = False
+
+    homeDir = os.path.expanduser('~')
+    anonDir = homeDir+"/.anonlog"
+    patternFile = anonDir+"/default"
+    keyFile = anonDir+"/key"
+
+    multiMatch = False
+    options = False
+    cliBatch = False
+    batchRun = False
+    terminalRows = 0
+    terminalColumns = 0
+
+    rows, width = subprocess.check_output(['stty', 'size']).decode().split()
+    terminalRows = int(rows)
+    terminalColumns = int(width)
+
+    filesToAnon = []
+    dirsToMake = []
+
+
+    try:
+        opts, args = getopt.getopt(argv, "bhi:o:pm", ["inputFile=", "outputFile=", "pattern", "multi", "patternFile=", "patternNo=", "keyFile=", "keyNo=", "inputDir=", "outputDir=", "batch", "batchRun", "skip=", "filePattern=",   ])
+    except getopt.GetoptError:
+        usage()
+        sys.exit(2)
+    for opt, arg in opts:
+        if opt == '-h':
+            usage()
+            sys.exit()
+        elif opt in ("-p", "--pattern"):
+            managePatterns = True
+        elif opt in ("-m", "--multi"):
+            multiMatch = True            
+            usage()
+            sys.exit(1)
+        elif opt in ("-i", "--inputFile"):
+            inputFile = arg
+        elif opt in ("-o", "--outputFile"):
+            outputFile = arg
+        elif opt in "--patternFile":
+            patternFile = arg
+            patternFileSpecfied = True
+        elif opt in "--patternNo":
+            patternNo = int(arg)
+        elif opt in "--keyFile":
+            keyFile = arg
+            keyFileSpecified = True
+        elif opt in "--keyNo":
+            keyNo = int(arg)
+        elif opt in "--inputDir":
+            inputDir = arg
+        elif opt in "--outputDir":
+            outputDir = arg
+        elif opt in "--batch":
+            cliBatch = True
+        elif opt in "--batchRun":
+            batchRun = True
+        elif opt in "--skip":
+            skip = int(arg)
+        elif opt in "--filePattern":
+            filePattern = arg
+
+
+    if cliBatch:
+        if managePatterns:
+            eprint(" Can't use pattern mangement in batch mode")
+            usage()
+            sys.exit(1)
+        if inputFile or outputFile:
+            eprint(" Input and output file can't be specified in batch mode")
+            usage()
+            sys.exit(1)
+        if not keyNo or not patternNo:
+            eprint(" Pattern and key number needs to be specifed in batch mode")
+            usage()
+            sys.exit(1)
+        if not outputDir or not inputDir:
+            eprint(" Input and output dir needs to be specified in batch mode")
+            usage()
+            sys.exit(1)
+        if not filePattern:
+            eprint(" Filename pattern of the file(s) to ananomyze is needed")
+            usage()
+            sys.exit(1)
+        absInputDir = os.path.abspath(inputDir)
+        absOutputDir = os.path.abspath(outputDir)
+        if absOutputDir == absInputDir:
+            eprint(" Input and Output dir can not be the same")
+            usage()
+            sys.exit(1)
+
+    else:
+        if (inputFile or outputFile) and managePatterns:
+            eprint(" Can't use pattern with files")
+            usage()
+            sys.exit(1)
+        if (not outputFile or not inputFile) and not managePatterns:
+            eprint(" No in or outputFile")
+            usage()
+            sys.exit(1)
+        if outputFile == inputFile and not managePatterns:
+            eprint(" Input and Output file can not be the same")
+            usage()
+            sys.exit(1)
+        if keyNo or patternNo:
+            eprint(" patternNo and/or keyNo can't be specified in interactive mode")
+            usage()
+            sys.exit(1)
+        if outputDir or inputDir:
+            eprint(" inputDir and/or outputDir can't be specified in interactive mode")
+            usage()
+            sys.exit(1)
+        if filePattern:
+            eprint(" File pattern is not supported in interactive mode")
+            usage()
+            sys.exit(1)
+
+
+
+    if not os.path.exists(anonDir):
+        if isWritable(homeDir):
+            os.mkdir(anonDir)
+        else:
+            eprint(" Home dir %s is not writable" % homeDir)
+            sys.exit(1)
+
+    clipath = getPath("fpenc")
+
+    # Check binary exists (and +x), if not print an error message
+    if clipath:
+        if os.path.exists(clipath) and os.access(clipath, os.X_OK):
+            pass
+        else:
+            print(" Cannot find fpenc in your PATH. Please install it.")
+            sys.exit(3)
+    else:
+        print(" Cannot find fpenc in your PATH. Please install it.")
+        sys.exit(3)
+
+    try:
+        myFile = open(patternFile, 'r')
+        myFile.close()
+        patternFiles = True
+    except (OSError, IOError):
+        patternFiles = False
+
+    if patternFileSpecfied and not patternFiles:
+        eprint(" Failed to open pattern file: %s" % patternFile)
+        sys.exit(1)
+
+    if not patternFiles:
+        try:
+            shutil.copyfile("/opt/anonymize/share/anonymize/default", patternFile)
+            patternFiles = True
+        except (OSError, IOError):
+            patternFiles = False
+
+    if not patternFiles:
+        try:
+            print()
+            print(getFormat(" <b>No default pattern file</n>, please follow instructions creating default pattern file"))
+            print()
+            worked, notSaved = CreatePatternGroupTableFile(patternFile, anonDir, notSaved)
+            if not worked:
+                sys.exit(1)
+            patternFiles = True
+        except (EOFError, KeyboardInterrupt):
+            sys.exit()
+
+    patternLines = getLines(patternFile)
+    patternGroupTable = GetPatternLines(patternLines, patternFile)
+
+    try:
+        myFile = open(keyFile, 'r')
+        myFile.close()
+        keyFiles = True
+    except (OSError, IOError):
+        keyFiles = False
+
+    if keyFileSpecified and not keyFiles:
+        eprint(" Failed to open key file: %s" % keyFile)
+        sys.exit(1)
+
+    if not keyFiles:
+        try:
+            print()
+            print(getFormat(" <b>No default key file</n>, please follow instructions creating default key file"))
+            print()
+            keyGroupTable, notSavedKey = CreateKeyFile(keyFile, anonDir, clipath, notSavedKey)
+            if not keyGroupTable:
+                sys.exit(1)
+            keyFiles = True
+        except (EOFError, KeyboardInterrupt):
+            sys.exit()
+
+    keyLines = getLines(keyFile)
+    keyGroupTable = GetKeyLines(keyLines)
+
+    if cliBatch:
+        key = CliSelectKeyGroup(keyGroupTable, keyNo)
+        lookupDict = dict()
+        pattern = CliSelectPatternGroup(patternGroupTable, patternNo)
+
+        for baseName, _dirNames, fileNames in os.walk(inputDir):
+            for fileName in fnmatch.filter(fileNames, filePattern):
+                filesToAnon.append(os.path.join(baseName, fileName))
+                toMake = os.path.join(outputDir, baseName)
+                if toMake not in dirsToMake:
+                    dirsToMake.append(toMake)
+
+        for dirToCreate in dirsToMake:
+            mkdir_p(dirToCreate)
+
+        clear()
+        numberOfFiles = len(filesToAnon)
+        mainprogress = ProgressBar(numberOfFiles, fmt=ProgressBar.FULLFILES, rowOffset=1)
+        mainprogress.current += 1
+        mainprogress()
+        try:
+            for inputFile in filesToAnon:
+                fileprogress = FileNameDisplay(fileName = inputFile)
+                fileprogress()
+#                rows, width = subprocess.check_output(['stty', 'size']).decode().split()
+#                terminalRows = int(rows)
+#                terminalColumns = int(width)
+#                gotoxy(0, terminalRows/2 - 1)
+#                clreol()
+#                printString = stringTurncate(inputFile, terminalColumns)
+#                print("%s" % printString)
+
+                outputFile = os.path.join(outputDir, inputFile)
+                anonymizeRegexp(inputFile, outputFile, patternGroupTable, patternNo, keyGroupTable, keyNo, multiMatch, clipath, lookupDict, skip, cliBatch, mainprogress, fileprogress)
+                mainprogress.current += 1
+                mainprogress()
+
+            mainprogress.done()
+            clear()
+        except (EOFError, KeyboardInterrupt):
+            sys.exit(1)
+
+
+    else:
+        choice = ''
+        while not re.match('q|quit', '%s' % choice, re.IGNORECASE):
+            print()
+            if pattern:
+                print(getFormat(" Pattern is set to: <b>%s</n>" % patternGroupTable[pattern].patternName))
+                if patternGroupTable[pattern].noPatterns > 1:
+                    options = True
+            if multiMatch:
+                print(getFormat(" MultiMatch is set to: <b>True</n>"))
+            if key:
+                print(getFormat(" Key is set to: <b>%s</n>" % keyGroupTable[key].keyName))
+            print()
+            if not pattern:
+                print(getFormat(" <b>Mg</n>) Manage Pattern Group(s)"))
+                print(getFormat(" <b>Mf</n>) Manage Pattern File(s)"))
+            print(getFormat(" <b>Sp</n>) Set Pattern Group"))
+            if options:
+                print(getFormat(" <b>Sm</n>) Set MultiMatch"))
+            print()
+            if not key:
+                print(getFormat(" <b>Me</n>) Manage Encryption Key(s)"))
+            print(getFormat(" <b>Se</n>) Set Encryption Key"))
+            if key and pattern and inputFile and outputFile:
+                print(getFormat(" <b>Ee</n>) Execute Encryption"))
+            print()
+            print(getFormat(" <b>Q</n>uit) Quit"))
+            print()
+            try:
+                # Not the best to have this much code in a try statement
+                # but we want to catch all keyboard events down in the
+                # TUI code
+                choice = raw_input(prompt)
+                print()
+
+                if re.match('Mg', choice, re.IGNORECASE):
+                    patternGroupTable, notSaved = ManagePatternGroupTable(patternGroupTable, patternFile, anonDir, notSaved)
+                if re.match('Mf', choice, re.IGNORECASE):
+                    patternGroupTable, patternFile, notSaved = ManagePatternGroupFiles(patternGroupTable, patternFile, anonDir, notSaved)
+                if re.match('Sp', choice, re.IGNORECASE):
+                    pattern = SelectPatternGroup(patternGroupTable)
+                    if pattern == -1:
+                        pattern = None
+                    options = False
+                    multiMatch = False
+                if re.match('Me', choice, re.IGNORECASE):
+                    keyGroupTable, notSavedKey = ManageKeyGroupTable(keyGroupTable, keyFile, clipath, anonDir, notSavedKey)
+                if re.match('Se', choice, re.IGNORECASE):
+                    key = SelectKeyGroup(keyGroupTable)
+                    lookupDict = dict()
+                if re.match('Sm', choice, re.IGNORECASE):
+                    if not multiMatch:
+                        multiMatch = True
+                    else:
+                        multiMatch = False
+                if re.match('Ee', choice, re.IGNORECASE):
+                    anonymizeRegexp(inputFile, outputFile, patternGroupTable, pattern, keyGroupTable, key, multiMatch, clipath, lookupDict, skip, cliBatch)
+                if re.match('q|quit', '%s' % choice, re.IGNORECASE) and (notSaved or notSavedKey):
+                    if not yesNo(" Unsaved changes do you want to Quit? %s" % choice):
+                        choice = ''
+
+            except (EOFError, KeyboardInterrupt):
+                sys.exit(1)
+
+    sys.exit(1)
+
+if __name__ == '__main__':
+    main(sys.argv[1:])

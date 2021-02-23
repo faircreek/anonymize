@@ -1,0 +1,18 @@
+TOTAL_NO_PATTERN_GROUPS=4
+PATTERN_GROUP_NAME=ec_trace
+PATTERN_TUPLE_NO=2
+@#@, msisdn=@#@, getAgency@#@False@#@False@#@
+@#@, liid=@#@, getAgency()@#@False@#@False@#@
+PATTERN_GROUP_NAME=record_multi
+PATTERN_TUPLE_NO=2
+@#@) uniquuid: @#@  RecId:@#@False@#@False@#@
+@#@RecId: @#@ Type:@#@False@#@False@#@
+PATTERN_GROUP_NAME=message_reg
+PATTERN_TUPLE_NO=1
+@#@Back-End\: File\: [A-Z]{3,4}@#@ \(No\: 1\)@#@True@#@False@#@
+PATTERN_GROUP_NAME=csv
+PATTERN_TUPLE_NO=4
+@#@|@#@2@#@False@#@True@#@
+@#@|@#@5@#@False@#@True@#@
+@#@|@#@3@#@False@#@True@#@
+@#@|@#@4@#@False@#@True@#@

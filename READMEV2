@@ -1,0 +1,75 @@
+Please read the README as this one only covers the changes compared to
+version 1.x . 
+
+If you start the program with a -p and a print out of the default 
+pattern group or your own you will see that there are some new fields
+all false by default.
+
+  # | Pattern Group 
+  1 | ec_trace 
+                  | StrPatt/FiSep | EndPat/FiNo   | RegExp | CSV    | Multi  | Plus   | Norm   | Prefix | Min    | Max    | Blank  | Hash  
+                  | , msisdn=     | , getAgency   | False  | False  | False  | False  | False  | 0      | 0      | 0      | False  |       
+                  | , liid=       | , getAgency() | False  | False  | False  | False  | False  | 0      | 0      | 0      | False  |       
+  2 | record_multi 
+                  | StrPatt/FiSep | EndPat/FiNo | RegExp | CSV    | Multi  | Plus   | Norm   | Prefix | Min    | Max    | Blank  | Hash  
+                  | ) uniquuid:   |   RecId:    | False  | False  | False  | False  | False  | 0      | 0      | 0      | False  |       
+                  | RecId:        |  Type:      | False  | False  | False  | False  | False  | 0      | 0      | 0      | False  |       
+  3 | message_reg 
+                  | StrPatt/FiSep                | EndPat/FiNo | RegExp | CSV    | Multi  | Plus   | Norm   | Prefix | Min    | Max    | Blank  | Hash  
+                  | Back-End\: File\: [A-Z]{3,4} |  \(No\: 1\) | True   | False  | False  | False  | False  | 0      | 0      | 0      | False  |       
+  4 | csv      
+                  | StrPatt/FiSep | EndPat/FiNo | RegExp | CSV    | Multi  | Plus   | Norm   | Prefix | Min    | Max    | Blank  | Hash  
+                  | |             | 2           | False  | True   | False  | False  | False  | 0      | 0      | 0      | False  |       
+                  | |             | 5           | False  | True   | False  | False  | False  | 0      | 0      | 0      | False  |       
+                  | |             | 3           | False  | True   | False  | False  | False  | 0      | 0      | 0      | False  |       
+                  | |             | 4           | False  | True   | False  | False  | False  | 0      | 0      | 0      | False  |   
+
+
+Those new fields are at this point only supported in CSV mode, bar multi. 
+Multi is used instead for the --multi command line switch. Instead you
+will now set it for the pattern if you want the next pattern to be used
+on the same line.
+
+NOTE: Patterns needs to be unique, you can't have a pattern matching more
+than ones on a line, though we are in the works supporting it. We are
+also working on EOF as final pattern. 
+
+The new fields:
+
+Plus: If Plus is set to true a leading plus of the number string will be
+removed totally. I.e. +966456123456 will become 966456123456 and then
+it will become anonymized
+
+Norm: If set to true the number string will be normalized according to
+the following rules before it's anonymized.
+
+Max: length of non-normalized number -> all MSISDNs equal or above this number are considered normalized (containing country code)
+Min: length of non-normalized number -> all MSISDNs equal or bellow this number are considered normalized (service MSISDNs)
+
+Prefix: Country code to add, 
+
+Blank: Instead of normalize we blank, we simply blank the field with 10x 
+of the chars specified in the Hash option. This is a simple way to blank
+out data in general, read messages that you don't want to display in 
+clear text.
+
+We can also batch process files we want to, it's done
+on a directory level, where you will anonymize all files with that
+matches a specific pattern. 
+
+
+Here is an example:
+
+anonymize --inputDir='.' --outputDir=/root/ToAnon2  --batch --skip=2 \
+--patternNo=4 --keyNo=1 --filePattern='P_[CS][AM]*_FLAT.csv'
+
+This command will anonymize all files under the current 
+and down, matching P_[CS][AM]*_FLAT.csv. It will replicate the current
+directory's under laying file structure which matches the P_[CS][AM]*_FLAT.csv
+pattern to /root/ToAnon2. It wall anonymize using pattern number four in the 
+default pattern file, and key number 1 in the default key file. You can specify
+alternative pattern and key files on the command line with --patternFile and 
+--keyFile. To use batch processing you need to use the --batch switch,
+--skip is how many lines at the start of the files you will skip anonymize
+it can be very helpful way to preserve headers.
+

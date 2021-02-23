@@ -1,0 +1,519 @@
+Anonymize:
+
+Is a TUI/CLI driven program, that you will use to to anonymize, e.g. log files, csv 
+files and so on. Anonymize can anonymize any numerical string between two user 
+defined patterns in a textual file. Anonymize handles both regular expression 
+patterns and string based patterns. Furthermore Anonymize can also anonymize any 
+numerical data in a CSV field.
+ 
+
+Install Anonymize on a RHEL 7 based machien by executing:
+rpm -i anonymize-2.0-8.x86_64.rpm
+
+
+Start the application by executing:
+/opt/anonymize/bin/anonymize -p
+
+This is the way you always should start the application if you want to manage 
+patterns and CSV definitions. 
+
+Since this is the first time you start the application you will be asked to 
+create a new Key and Tweak group. The key and the teak is what will encrypt your 
+numerical strings. Below is an example of how to create such Key and Tweak 
+group. NOTE: Password and Salt aren't echoed.
+
+
+Here is some additional information in regards to the key and the tweak.
+
+
+Salt: In cryptography, a salt is random data that is used as an additional input 
+to a one-way function that "hashes" a password or passphrase. Salts are closely 
+related to the concept of nonce. The primary function of salts is to defend 
+against dictionary attacks or against its hashed equivalent.
+
+Password: Well that is the password used to generate the 256 bit aes key, which 
+is used together with the tweak to encrypt i.e. anonymize your numerical 
+strings.
+
+Tweak: Has to do with blockcipher. Tweak functions together with the key, and it 
+determines the permutation used.
+
+NOTE: This is very simplified otherwise I would cover this whole README in 
+regards to all this.
+
+That say you need to create holding name for you key and tweak. It can be 
+anything but I usually use "Main" as in the example below. You can encrypt/anon 
+with different keys and tweaks and that will make things stronger. However you 
+should really stick with one key and one tweak, unless it's two different 
+organizations you send files to then you have one key and one tweak for each of 
+them.
+
+Tweak isn't really anything secret so we echo it out. In reality salt isn’t 
+either, but we treat it just as the password i.e. we do not echo it. Any 
+moderate length alphanumerical string will do for salt, password and tweak.
+
+
+---
+
+ No default key file, please follow instructions creating default key file
+
+
+ New Key and Tweak Group:
+
+ The Key and Tweak Group name need to be one word
+ containing any A-P,R-Z,a-p,r-z,0-9 and _
+
+ Quit) Quit
+
+[jinx]> Main
+
+----
+
+Main is just a name I use you can use any name you want.
+
+----
+
+
+ New Salt
+
+ Salt need to be one word
+ containing any A-P,R-Z,a-p,r-z,0-9 and _
+
+ 
+ Quit) Quit
+
+[jinx]> 
+
+
+ Repeate New Salt
+
+ Quit) Quit
+
+[jinx]> 
+
+
+ New Password
+
+ Password need to be one word
+ containing any A-P,R-Z,a-p,r-z,0-9 and _
+ 
+ 
+ Quit) Quit
+
+[jinx]> 
+
+
+ Repeate New Password
+
+ Quit) Quit
+
+
+ Tweak need to be one word
+ containing any A-P,R-Z,a-p,r-z,0-9 and _
+
+ Quit) Quit
+
+[jinx]> 
+
+
+---
+
+When the Key and Tweak group is created, you find yourself at the top menu. 
+
+---
+
+ Mg) Manage Pattern Group(s)
+ Mf) Manage Pattern File(s)
+ Sp) Set Pattern Group
+
+ Me) Manage Encryption Key(s)
+ Se) Set Encryption Key
+
+ Quit) Quit
+
+[jinx]> 
+
+---
+
+Type Mg and enter 
+
+---
+ Manage Pattern Groups in default Pattern File
+
+ Pr) Print Pattern Groups
+ Cr) Create Pattern Group
+ Cp) Copy Pattern Group
+ Ed) Edit Pattern Group
+ De) Delete Pattern Group
+
+
+ Quit) Quit
+
+[jinx]> 
+
+---
+
+New menu, as you can see we can print what we call pattern groups, type Pr and enter.
+
+---
+
+  # | Pattern Group 
+  1 | ec_trace 
+                  | StrPatt/FiSep | EndPat/FiNo   | RegExp | CSV    | Multi  | Plus   | Norm   | Prefix | Min    | Max    | Blank  | Hash  
+                  | , msisdn=     | , getAgency   | False  | False  | False  | False  | False  | 0      | 0      | 0      | False  |       
+                  | , liid=       | , getAgency() | False  | False  | False  | False  | False  | 0      | 0      | 0      | False  |       
+  2 | record_multi 
+                  | StrPatt/FiSep | EndPat/FiNo | RegExp | CSV    | Multi  | Plus   | Norm   | Prefix | Min    | Max    | Blank  | Hash  
+                  | ) uniquuid:   |   RecId:    | False  | False  | False  | False  | False  | 0      | 0      | 0      | False  |       
+                  | RecId:        |  Type:      | False  | False  | False  | False  | False  | 0      | 0      | 0      | False  |       
+  3 | message_reg 
+                  | StrPatt/FiSep                | EndPat/FiNo | RegExp | CSV    | Multi  | Plus   | Norm   | Prefix | Min    | Max    | Blank  | Hash  
+                  | Back-End\: File\: [A-Z]{3,4} |  \(No\: 1\) | True   | False  | False  | False  | False  | 0      | 0      | 0      | False  |       
+  4 | csv      
+                  | StrPatt/FiSep | EndPat/FiNo | RegExp | CSV    | Multi  | Plus   | Norm   | Prefix | Min    | Max    | Blank  | Hash  
+                  | |             | 2           | False  | True   | False  | False  | False  | 0      | 0      | 0      | False  |       
+                  | |             | 5           | False  | True   | False  | False  | False  | 0      | 0      | 0      | False  |       
+                  | |             | 3           | False  | True   | False  | False  | False  | 0      | 0      | 0      | False  |       
+                  | |             | 4           | False  | True   | False  | False  | False  | 0      | 0      | 0      | False  |
+ 
+
+---
+
+Let's Look at pattern group #1, ec_trace. This pattern has two patterns, it's 
+string patterns, as you can see both CSV and RegExp is False. This means that 
+any numerical string between the Start Pattern (StrPatt) and the End Pattern 
+(EndPat) will be anonymized. In other words, any line that matches "something" + 
+Start Pattern + Numbers + End Pattern + "something" will get the Numbers 
+anonymized.
+
+Pattern group #2 is just as pattern group #1, but pattern group #3 has a RegExp 
+pattern in it, RegExp set to True. This means that it's not matching on a 
+straight string pattern but we are matching with python regular expressions, in 
+this case as the string "Back-End: File: " the “:” needs to be escaped, then 
+followed by 3 or 4 capital letters. The end pattern is a string just, () and : 
+all escaped. 
+
+Pattern group #4 is of CSV type, so it isn’t pattern at all, instead you specify 
+Field Separator (FiSep), and what Field Number FiNo that you want to anonymize. 
+Note, that Anonymize will anonymize any numerical string in the CSV field, but 
+will not touch any non-numerical strings. For example +234566 will encrypt i.e. 
+anonymize to  +563853 and dfr456df4567 will encrypt to dfr324df6594 .
+
+The editing, deletion, creation and so on of the pattern groups are pretty 
+self-explanatory. When editing you will drill down in the pattern group and be 
+able to select individual patterns to create, edit, delete and so forth. When 
+you made changes you will be alerted that you need to save your changes. When 
+your back at the main Pattern Manage Group menu.
+
+Please Quit out of the program 
+
+Please start the program with (if your input file is named flat.csv and your 
+output file is called flat.csv.anon)
+
+/opt/anonymize/bin/anonymize -i flat.csv -o flat.csv.anon
+
+Lets, select a pattern
+
+---
+
+ Mg) Manage Pattern Group(s)
+ Mf) Manage Pattern File(s)
+ Sp) Set Pattern Group
+
+ Me) Manage Encryption Key(s)
+ Se) Set Encryption Key
+
+ Quit) Quit
+
+[jinx]> Sp
+
+
+  # | Pattern Group 
+  1 | ec_trace 
+  2 | record_multi 
+  3 | message_reg 
+  4 | csv      
+
+ Select Pattern Group listed Above:
+
+ Quit) Quit
+
+[jinx]> 4
+
+
+ Pattern is set to: csv
+
+ Mg) Manage Pattern Group(s)
+ Mf) Manage Pattern File(s)
+ Sp) Set Pattern Group
+ Sm) Set MultiMatch
+
+ Me) Manage Encryption Key(s)
+ Se) Set Encryption Key
+
+ Quit) Quit
+
+[jinx]> 
+
+---
+
+The CSV pattern group has more than one pattern in it, it has four. When you 
+select a group that has more than one pattern you can select to run every 
+pattern in that group on each line in the file. On a CSV file, this is a give so 
+select Sm to set MultiMatch i.e. match the pattern several times, since you want 
+to anonymize all fields not just the first.  In other words on a CSV file, it's 
+not really about matching any patterns, it is just a matter of anonymizing each 
+field you specified in the pattern group. String pattern and RegExp patterns are 
+different, sometimes you know there will only be one match per line. For 
+example, an application log has debug output that prints phone number and 
+taxation number, each one on separate lines, then it's no point to test both 
+patterns as soon as you get a hit you can anonymize and move on to the next 
+line, in this case, you do not want to set MultiMatch. If you, on the other 
+hand, has the phone number and taxation number printed in different sections of 
+the same line well then you need to set MultiMatch.
+
+---
+
+ Mg) Manage Pattern Group(s)
+ Mf) Manage Pattern File(s)
+ Sp) Set Pattern Group
+
+ Me) Manage Encryption Key(s)
+ Se) Set Encryption Key
+
+ Quit) Quit
+
+[jinx]> Sp
+
+
+  # | Pattern Group 
+  1 | ec_trace 
+  2 | record_multi 
+  3 | message_reg 
+  4 | csv      
+
+ Select Pattern Group listed Above:
+
+ Quit) Quit
+
+[jinx]> 4
+
+
+ Pattern is set to: csv
+
+ Sp) Set Pattern Group
+ Sm) Set MultiMatch
+
+ Me) Manage Encryption Key(s)
+ Se) Set Encryption Key
+
+ Quit) Quit
+
+[jinx]> Sm
+
+
+ Pattern is set to: csv
+ MultiMatch is set to: True
+
+ Sp) Set Pattern Group
+ Sm) Set MultiMatch
+
+ Me) Manage Encryption Key(s)
+ Se) Set Encryption Key
+
+ Quit) Quit
+
+[jinx]> Se
+
+
+  # | Key Group  | Tweak      | Key         
+  1 | Main       | asdfg      | c4ab6..63569
+
+ Select Key Group listed Above:
+
+ Quit) Quit
+
+[jinx]> 1
+
+
+ Pattern is set to: csv
+ MultiMatch is set to: True
+ Key is set to: Main
+
+ Sp) Set Pattern Group
+ Sm) Set MultiMatch
+
+ Se) Set Encryption Key
+ Ee) Execute Encryption
+
+ Quit) Quit
+
+
+---
+
+As you can see it's first when you choose a pattern group with more than one 
+pattern the MultiMatch will appear, and it's first when you set both pattern and 
+key and has input and output files that the Execute Encryption will appear. Type 
+Ee and hit enter if you want to anonymize according to the rules in the pattern 
+group you selected.
+
+There is one more feature worth writing about, the Manage Pattern File(s), 
+please quit out of the program and start it again with the -p option.
+
+
+---
+
+
+ Mg) Manage Pattern Group(s)
+ Mf) Manage Pattern File(s)
+ Sp) Set Pattern Group
+
+ Me) Manage Encryption Key(s)
+ Se) Set Encryption Key
+
+ Quit) Quit
+
+[jinx]> Mf
+
+
+ Manage Pattern Groups Files, default Loaded
+
+ Li) List Pattern Group Files
+ Cr) Create and Load Pattern Group File
+ Lo) Load Pattern Group File
+ De) Delete Pattern Group File
+
+
+ Quit) Quit
+
+[jinx]> Li
+
+
+ Pattern Groups Files
+
+  # | Pattern Group File 
+  1 | message_end 
+
+
+ Manage Pattern Groups Files, default Loaded
+
+ Li) List Pattern Group Files
+ Cr) Create and Load Pattern Group File
+ Lo) Load Pattern Group File
+ De) Delete Pattern Group File
+
+
+ Quit) Quit
+
+[jinx]> Cr
+
+
+ New Pattern Group File Name
+ New pattern group file name need to be one word
+ containing any A-P,R-Z,a-p,r-z,0-9 and _
+
+ Quit) Quit
+
+[jinx]> csvFile 
+
+
+ New Pattern Group
+ Pattern group name need to be one word containing any A-P,R-Z,a-p,r-z,0-9 and _
+
+ Quit) Quit
+
+[jinx]> csv
+
+
+ CSV: False
+ We have the ability to anonymize CSV files. If
+ we only need separator and field to anonymize
+
+
+ Enter) False
+ Quit) Quit
+
+[jinx]> True
+
+
+ CSV field separator:
+ separator needs to be prefix and suffixed with @#@ e.g. @#@pattern@#@
+
+ Quit) Quit
+
+[jinx]> @#@|@#@
+
+
+ Field No:
+ The field number that we wish to anonymize
+
+ Quit) Quit
+
+[jinx]> 4
+
+
+ Manage Pattern Groups Files, csvFile Loaded
+
+ Li) List Pattern Group Files
+ Cr) Create and Load Pattern Group File
+ Lo) Load Pattern Group File
+ De) Delete Pattern Group File
+
+
+ Quit) Quit
+
+[jinx]> Li
+
+
+ Pattern Groups Files
+
+  # | Pattern Group File 
+  1 | default  
+  2 | message_end 
+
+
+ Manage Pattern Groups Files, csvFile Loaded
+
+ Li) List Pattern Group Files
+ Cr) Create and Load Pattern Group File
+ Lo) Load Pattern Group File
+ De) Delete Pattern Group File
+
+
+ Quit) Quit
+
+---
+
+As seen in this sequence, we first list files we can load, then we create a new 
+pattern file and since it's new we get prompted to create the initial pattern 
+group, in this case, a CSV type of group. Which is then automatically saved and 
+loaded. You can now quit out of this menu and enter the pattern group management 
+menu if you so like. The pattern files created are located under ~/.anonlog/ , 
+for example, a support organization will in this way create pattern files 
+containing patterns to anonymize different log or CVS files that their software 
+produces. They can the send those pattern files to customers how can drop the 
+files in their ~/.anonlog/ directory. Then they can start Anonymize load the 
+file select right pattern and anonymize the files that support requested them to 
+send.
+ 
+
+
+
+
+ 
+
+
+
+
+
+
+ 
+
+
+
+
+       
+
+
+      
+
